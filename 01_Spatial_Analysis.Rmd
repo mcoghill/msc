@@ -40,7 +40,8 @@ st_write(ldb_aoi, file.path(dir_out, "ldb.gpkg"), layer = "AOI",
 
 ```
 
-Next, do some BEC work. We want to see the BEC zones within Lac Du Bois park.
+Next, do some BEC work. We want to see the BEC zones within Lac Du Bois park. 
+NOTE: The coding here forces a new BEC polygon to be downloaded every time it is ran. To prevent that, change to "force = FALSE", though it doesn't take overly long anyways if you're patient!
 
 ```{r BEC Manipulation}
 
@@ -49,7 +50,7 @@ ldb_bec <- bcmaps::bec(force = TRUE) %>%
   sf::st_set_agr("constant") %>% 
   sf::st_intersection(ldb_aoi) %>% 
   group_by(ZONE, MAP_LABEL) %>% 
-  summarise(.groups = "drop") %>% 
+  summarise(do_union = TRUE, .groups = "drop") %>% 
   dplyr::rename(SUBZONE = MAP_LABEL) %>% 
   dplyr::mutate(bgc_area = conv_unit(units::drop_units(st_area(.)), "m2", "hectare")) %>% 
   st_cast("MULTIPOLYGON")
@@ -81,7 +82,7 @@ ldb_sk <- dplyr::filter(ldb_iapp, grepl("SK", MAP_LABEL)) %>%
 ldb_total_invaded_area <- conv_unit(units::drop_units(st_area(st_union(ldb_iapp))), "m2", "hectare")
 ldb_total_invaded_perc <- ldb_total_invaded_area / ldb_area * 100
 ldb_sk_invaded_area <- conv_unit(units::drop_units(st_area(ldb_sk)), "m2", "hectare")
-ldb_sk_invaded_perc <- ldb_sk_area / ldb_area * 100 # ~13.38%
+ldb_sk_invaded_perc <- ldb_sk_invaded_area / ldb_area * 100 # ~13.38%
 
 # Where does spotted knapweed typically invade in Lac Du Bois?
 ldb_sk_by_subzone <- sf::st_set_agr(ldb_bec, "constant") %>% 
@@ -92,7 +93,8 @@ ldb_sk_by_subzone <- sf::st_set_agr(ldb_bec, "constant") %>%
   st_cast("MULTIPOLYGON")
 
 ldb_sk_by_zone <- dplyr::group_by(ldb_sk_by_subzone, ZONE) %>% 
-  dplyr::summarise(area = sum(area), bgc_area = sum(bgc_area), .groups = "drop") %>% 
+  dplyr::summarise(area = sum(area), bgc_area = sum(bgc_area), do_union = TRUE,
+                   .groups = "drop") %>% 
   dplyr::mutate(ratio = area / bgc_area * 100) %>% 
   dplyr::arrange(desc(area)) %>% 
   st_cast("MULTIPOLYGON")
