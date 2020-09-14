@@ -1,0 +1,363 @@
+---
+title: "01_Spatial_Analysis"
+author: "Matt"
+date: "9/10/2020"
+output: html_document
+---
+
+This document will outline the spatial analyses used in generating figures for my MSc. This code should be reproducible and should work into the future as long as the functions stay the same. First, load libraries and initialize folders.
+
+```{r}
+
+library(bcmaps)
+library(bcdata)
+library(sf)
+library(tidyverse)
+library(foreach)
+library(measurements)
+
+dir_out <- file.path("./01_Spatial_Data")
+dir.create(dir_out, showWarnings = FALSE)
+
+```
+
+Next, generate a study area of Lac Du Bois from the publicly available BC Parks, Ecological Reserves, and Protected Areas dataset
+
+```{r Lac Du Bois park}
+
+ldb_aoi <- bcdata::bcdc_query_geodata("1130248f-f1a3-4956-8b2e-38d29d3e4af7", crs = 3005) %>% 
+  bcdata::filter(PROTECTED_LANDS_NAME %in% c(
+    "LAC DU BOIS GRASSLANDS PROTECTED AREA", 
+    "MCQUEEN CREEK ECOLOGICAL RESERVE",
+    "TRANQUILLE ECOLOGICAL RESERVE")) %>% 
+  bcdata::collect() %>% 
+  sf::st_union()
+
+ldb_area <- conv_unit(units::drop_units(st_area(ldb_aoi)), "m2", "hectare")
+
+st_write(ldb_aoi, file.path(dir_out, "ldb.gpkg"), layer = "AOI",
+         delete_layer = TRUE, quiet = TRUE)
+
+```
+
+Next, do some BEC work. We want to see the BEC zones within Lac Du Bois park.
+
+```{r BEC Manipulation}
+
+# Lac Du Bois BEC zones and subzones
+ldb_bec <- bcmaps::bec(force = TRUE) %>% 
+  sf::st_set_agr("constant") %>% 
+  sf::st_intersection(ldb_aoi) %>% 
+  group_by(ZONE, MAP_LABEL) %>% 
+  summarise(.groups = "drop") %>% 
+  dplyr::rename(SUBZONE = MAP_LABEL) %>% 
+  dplyr::mutate(bgc_area = conv_unit(units::drop_units(st_area(.)), "m2", "hectare")) %>% 
+  st_cast("MULTIPOLYGON")
+
+st_write(ldb_bec, file.path(dir_out, "ldb.gpkg"), layer = "BEC",
+         delete_layer = TRUE, quiet = TRUE)
+
+```
+
+In this next section, we are going to use the IAPP (Invasive Alien Plant Program) database to find the spotted knapweed polygons in Lac Du Bois. 
+
+```{r invasive alien plant site}
+
+# Download invasive plant boundaries from IAPP within the Lac Du Bois area
+ldb_iapp <- bcdata::bcdc_query_geodata("10ecf9ad-1555-4043-834a-f5d24a506d59", crs = 3005) %>% 
+  bcdata::filter(bcdata::BBOX(sf::st_bbox(ldb_aoi), crs = 3005)) %>% 
+  collect() %>% 
+  sf::st_set_agr("constant") %>% 
+  {if(nrow(.) > 0) {
+    sf::st_intersection(., ldb_aoi)
+  } else .} %>% 
+  st_cast("MULTIPOLYGON")
+
+# Filter only records containing "SK" label for spotted knapweed
+ldb_sk <- dplyr::filter(ldb_iapp, grepl("SK", MAP_LABEL)) %>% 
+  st_union()
+
+# Total areas of invasion in Lac Du Bois
+ldb_total_invaded_area <- conv_unit(units::drop_units(st_area(st_union(ldb_iapp))), "m2", "hectare")
+ldb_total_invaded_perc <- ldb_total_invaded_area / ldb_area * 100
+ldb_sk_invaded_area <- conv_unit(units::drop_units(st_area(ldb_sk)), "m2", "hectare")
+ldb_sk_invaded_perc <- ldb_sk_area / ldb_area * 100 # ~13.38%
+
+# Where does spotted knapweed typically invade in Lac Du Bois?
+ldb_sk_by_subzone <- sf::st_set_agr(ldb_bec, "constant") %>% 
+  sf::st_intersection(ldb_sk) %>% 
+  dplyr::mutate(area = conv_unit(units::drop_units(st_area(.)), "m2", "hectare"), 
+                ratio = area / bgc_area * 100) %>% 
+  dplyr::arrange(desc(area)) %>% 
+  st_cast("MULTIPOLYGON")
+
+ldb_sk_by_zone <- dplyr::group_by(ldb_sk_by_subzone, ZONE) %>% 
+  dplyr::summarise(area = sum(area), bgc_area = sum(bgc_area), .groups = "drop") %>% 
+  dplyr::mutate(ratio = area / bgc_area * 100) %>% 
+  dplyr::arrange(desc(area)) %>% 
+  st_cast("MULTIPOLYGON")
+
+ldb_stats <- tribble(
+  ~stat, ~value, 
+  "n_invasive_recordings", nrow(ldb_iapp), 
+  "ldb_sk_area_ha", ldb_sk_invaded_area,
+  "ldb_sk_perc", ldb_sk_invaded_perc,
+  "ldb_invaded_area_ha", ldb_total_invaded_area, 
+  "ldb_invaded_perc", ldb_total_invaded_perc,
+  "ldb_area", ldb_area,
+)
+
+# Write outputs, save in single file for clarity
+st_write(ldb_iapp, file.path(dir_out, "ldb.gpkg"), layer = "IAPP_All",
+         delete_layer = TRUE, quiet = TRUE)
+st_write(ldb_sk, file.path(dir_out, "ldb.gpkg"), layer = "IAPP_SK",
+         delete_layer = TRUE, quiet = TRUE)
+st_write(ldb_sk_by_subzone, file.path(dir_out, "ldb.gpkg"), layer = "SK_by_subzone",
+         delete_layer = TRUE, quiet = TRUE)
+st_write(ldb_sk_by_zone, file.path(dir_out, "ldb.gpkg"), layer = "SK_by_zone",
+         delete_layer = TRUE, quiet = TRUE)
+write.csv(ldb_stats, file.path(dir_out, "ldb_stats.csv"), row.names = FALSE)
+
+```
+
+Spotted knapwweed appears to be most dominant in BG zones in Lac Du Bois, followed by IDF zones. What about throughout BC? Is this consistent with the rest of the province or an artifact of a small sample area?
+
+```{r Provincial Analyses}
+# This section takes a while because it deals with province wide data.
+
+# Get full IAPP database
+bc_iapp <- bcdata::bcdc_query_geodata("10ecf9ad-1555-4043-834a-f5d24a506d59", crs = 3005) %>% 
+  collect()
+
+# Select only records containing "SK" in the MAP_LABEL column, and then calculate
+# the total area of all polygons. Need to union them because muliple polygons
+# overlap with one another, so if total area was calculated per polygon you get
+# an overinflated area rather than when they are merged together.
+bc_sk <- dplyr::filter(iapp_full, grepl("SK", MAP_LABEL)) %>% 
+  st_union()
+
+# Total area of SK invasion in BC
+bc_sk_invaded_area <- conv_unit(units::drop_units(st_area(bc_sk)), "m2", "hectare")
+bc_sk_invaded_perc <- bc_sk_invaded_area / bc_area(what = "land", units = "ha") * 100
+
+# Create BEC subzone layer
+bc_bgc_subzones <- bec() %>% 
+  dplyr::group_by(ZONE, MAP_LABEL) %>% 
+  dplyr::summarise(.groups = "drop", do_union = TRUE) %>% 
+  dplyr::rename(SUBZONE = MAP_LABEL) %>% 
+  dplyr::mutate(bgc_area = conv_unit(units::drop_units(st_area(.)), "m2", "hectare"))
+
+# The IAPP entries have BEC zone info but it's sporadic and incomplete. Instead, 
+# get that information from the actual BEC zone boundaries and calculate the 
+# percentage of a subzone occupied by SK. THIS TOOK ~5 HOURS TO RUN
+bc_sk_by_subzone <- sf::st_set_agr(bgc_subzones, "constant") %>% 
+  sf::st_intersection(bc_sk) %>% 
+  dplyr::mutate(area = conv_unit(units::drop_units(st_area(.)), "m2", "hectare"), 
+                ratio = area / bgc_area * 100) %>% 
+  dplyr::arrange(desc(area))
+
+# st_read(file.path(bc_out, "BC_SK_by_subzone.gpkg"), quiet = TRUE)
+
+# Much faster to drop geometry column and do simple addition for BEC zone summary
+bc_sk_by_zone <- st_drop_geometry(bc_sk_by_subzone) %>% 
+  group_by(ZONE) %>% 
+  summarise(area = sum(area), bgc_area = sum(bgc_area), .groups = "drop") %>% 
+  dplyr::mutate(ratio = area / bgc_area * 100) %>% 
+  dplyr::arrange(desc(ratio))
+
+# Save as individual files for faster reading in later on if necessary
+bc_out <- file.path(dir_out, "bc")
+dir.create(bc_out, showWarnings = FALSE)
+st_write(bc_iapp, file.path(bc_out, "BC_IAPP_All.gpkg"), 
+         delete_layer = TRUE, quiet = TRUE)
+st_write(bc_sk, file.path(bc_out, "BC_IAPP_SK.gpkg"), 
+         delete_layer = TRUE, quiet = TRUE)
+st_write(bc_bgc_subzones, file.path(bc_out, "BC_BEC.gpkg"), 
+         delete_layer = TRUE, quiet = TRUE)
+st_write(bc_sk_by_subzone, file.path(bc_out, "BC_SK_by_subzone.gpkg"), 
+         delete_layer = TRUE, quiet = TRUE)
+write.csv(bc_sk_by_zone, file.path(bc_out, "BC_SK_by_zone.csv"), row.names = FALSE)
+
+```
+
+Some takeaways from the analysis above: 
+SK covers ~.056% of the province of BC. That's not overly concerning; however, it does take up ~3% of the BG zone (7891 ha) and 2.46% of the PP zone (7260 ha), with the largest by area invasion happenning in the IDF zone (31,6677 ha), though this zone is very large and only accounts for 0.71% of the entire invaded area. This is important: this implies that the rate of spread in Lac Du Bois park (24%, 1.8%, and 9.1% in respective zones) is generally much higher than the remainder of the province for some reason!
+
+Each zone has very important values for forestry, First Nations, and conservation of endangered species. With that in mind, this process for finding invasive species trends throughout our province should be looked at more seriously. There are currently nearly 160,000 polygons for invasive plant records throughout BC, perhaps we should see where SK falls in terms of how invasive it is in comparison to other plant species. This will require a further investigation into the text of the "MAP_LABEL" column, below:
+
+```{r}
+
+# Extract plant species column
+bc_invasive_plants <- st_drop_geometry(iapp_full) %>% 
+  dplyr::select(MAP_LABEL)
+
+# Will use the separate function to get columns for different plants, but first
+# need to find out what the longest entry is to find how many columns there will be:
+n_splits <- max(nchar(str_replace_all(bc_invasive_plants$MAP_LABEL, "[^[:alnum:]]", "")), na.rm = TRUE)
+all_plants_wide <- bc_invasive_plants %>% 
+  tidyr::separate(MAP_LABEL, into = paste0("sp", 1:n_splits), sep = " ", extra = "drop")
+
+all_plants_string <- foreach(i = 1:ncol(all_plants_wide), .combine = rbind) %do% {
+  unique(all_plants_wide[, i]) %>% dplyr::rename(column = 1)
+} %>% grep(pattern = "[^[:alnum:]]", x = unique(.$column), value = TRUE, invert = TRUE) %>% 
+  na.omit()
+
+# There are 185 invasive species recorded in BC. Which ones take up the largest
+# amount of physical space in BC?
+bc_invasive_plant_areas <- foreach(i = 1:length(all_plants_string), .combine = rbind) %do% {
+  cat(paste0("Working on ", all_plants_string[i], " [", i, " of ", length(all_plants_string), "]\n"))
+  dplyr::filter(iapp_full, grepl(all_plants_string[i], MAP_LABEL)) %>% 
+    st_union() %>% 
+    st_as_sf() %>% 
+    dplyr::mutate(SPECIES = all_plants_string[i], 
+                  area = conv_unit(units::drop_units(st_area(.)), "m2", "hectare"))
+} %>% dplyr::rename(geometry = x) %>% 
+  dplyr::select(SPECIES, area) %>% 
+  dplyr::arrange(desc(area))
+
+# st_read(file.path(bc_out, "BC_IAPP_by_plant.gpkg"), quiet = TRUE)
+
+# Drop geometry for faster processing
+bc_inv_plant_areas_no_geom <- st_drop_geometry(bc_invasive_plant_areas)
+
+# It turns out that spotted and diffuse knapweed are the most invasive plants on
+# record in BC (ranked 1 and 2, resepectively)
+
+# This takes ~10-15 minutes
+bc_total_invaded_area <- st_union(bc_iapp) %>%
+  st_area() %>% 
+  units::drop_units() %>% 
+  conv_unit("m2", "hectare")
+
+bc_total_invaded_perc <- bc_total_invaded_area / bc_area(what = "land", units = "ha") * 100
+sk_of_all_invaded <- bc_sk_invaded_perc / bc_invaded_perc * 100
+
+# BGC zone additional data:
+bc_bgc_zone_data <- st_drop_geometry(bc_bgc_subzones) %>% 
+  dplyr::group_by(ZONE) %>% 
+  dplyr::summarise(area = sum(bgc_area), .groups = "drop") %>% 
+  dplyr::mutate(ratio = area / sum(area) * 100) %>% 
+  dplyr::arrange(desc(area))
+
+# Concatenate loose results
+bc_stats <- tribble(
+  ~stat, ~value, 
+  "n_invasive_species", length(all_plants_string), 
+  "bc_invaded_ha", bc_total_invaded_area, 
+  "bc_invaded_percent", bc_total_invaded_perc, 
+  "bc_invaded_SK_ha", bc_sk_invaded_area,
+  "bc_invaded_SK_perc", bc_sk_invaded_perc, 
+  "bc_invaded_SK_as_ratio_to_area_of_all_invasives", sk_of_all_invaded
+)
+
+st_write(bc_invasive_plant_areas, file.path(bc_out, "BC_IAPP_by_plant.gpkg"), 
+         delete_layer = TRUE, quiet = TRUE)
+write.csv(bc_bgc_zone_data, file.path(bc_out, "BC_BEC_zone_data.csv"), row.names = FALSE)
+write.csv(bc_stats, file.path(bc_out, "BC_stats.csv"), row.names = FALSE)
+
+```
+
+The analysis above shows that SK and DK are the most invasive plants in BC. Additionally, even though only 0.05% of the province is covered in SK, all invasive plants cover only 0.145% of the province, thus SK accounts for slightly more than 1/3 of the invasive plant cover in BC
+
+Separately, here is some code for finding all range reference areas within a study area (may also include smaller fencing units as well that are used in rangelands). It took a bit of wrangling but this works decently well, I think...
+
+```{r grazing exclosures}
+# AKA range reference areas (RRA's)
+
+ldb_rra <- bcdata::bcdc_query_geodata("946b09a4-c63e-48eb-b322-3701c8ba161d", crs = 3005) %>% 
+  bcdata::filter(bcdata::BBOX(sf::st_bbox(ldb_aoi), crs = 3005)) %>% 
+  collect() %>% 
+  sf::st_set_agr("constant") %>% 
+  {if(nrow(.) > 0) {
+    sf::st_intersection(., ldb_aoi)
+  } else .}
+
+# First, fix geometries. Some lines are close to other lines which should be merged
+# together. Doing a merge creates duplicate geometries which will be filtered out later
+ldb_rra_geom <- st_geometry(ldb_rra)
+ldb_rra_geom <- lapply(1:length(ldb_rra_geom), function(xx) {
+  x <- ldb_rra_geom[[xx]]
+  if(st_geometry_type(x) != "LINESTRING") NULL else {
+    ind <- which(st_is_within_distance(st_sfc(x, crs = 3005), ldb_rra_geom, dist = 1, sparse = FALSE))
+    ind <- ind[ind != xx]
+    ind <- ind[st_geometry_type(ldb_rra_geom[ind]) == "LINESTRING"]
+    if(length(ind) > 0) {
+      y <- st_union(
+        st_sfc(x, crs = 3005), 
+        ldb_rra_geom[ind]
+      )
+      coords <- st_coordinates(y)[, c("X", "Y")]
+      if(nrow(coords) >= 5) {
+        z <- foreach(i = 1:length(y), .combine = rbind, .final = st_linestring) %do% {
+          st_coordinates(y[[i]])[, c("X", "Y")]
+        } %>% st_cast("POLYGON")
+        if(st_is_valid(z)) z else {
+          zz <- st_make_valid(z)
+          if(st_geometry_type(zz) == "GEOMETRYCOLLECTION") {
+            polys <- st_collection_extract(zz, "POLYGON")
+            lines <- st_collection_extract(zz, "LINESTRING")
+            if((length(polys) != 1 || st_geometry_type(polys) != "POLYGON") ||
+               st_geometry_type(lines) != "LINESTRING") {
+              NULL
+            } else {
+              polys
+            }
+          } else NULL
+        }
+      } else NULL
+    } else {
+      coords <- st_coordinates(x)[, c("X", "Y")]
+      if(nrow(coords) >= 5) {
+        p1 <- st_point(coords[1, ])
+        p2 <- st_point(coords[nrow(coords), ])
+        if(st_is_within_distance(p1, p2, 0, sparse = FALSE)) {
+          st_cast(x, "POLYGON")
+        } else NULL
+      } else NULL
+    }
+  }
+})
+# Apply new geometries to geometry columns
+ldb_rra <- st_set_geometry(ldb_rra, st_sfc(ldb_rra_geom, crs = 3005)) %>% 
+  dplyr::filter(!st_is_empty(.))
+
+# Remove duplicated polygons
+ldb_rra_geom <- st_geometry(ldb_rra)
+ldb_rra_geom <- lapply(1:length(ldb_rra_geom), function(xx) {
+  x <- ldb_rra_geom[[xx]]
+  sub_geom <- lapply(1:length(ldb_rra_geom), function(yy) {
+    if(yy > xx) {
+      y <- ldb_rra_geom[[yy]]
+      if(x == y) {
+        out <- NULL 
+      } else out <- x
+    } else out <- x
+  })
+  if(any(sapply(sub_geom, is.null))) NULL else x
+})
+
+# Apply new geometries to geometry columns
+ldb_rra <- st_set_geometry(ldb_rra, st_sfc(ldb_rra_geom, crs = 3005)) %>% 
+  dplyr::filter(!st_is_empty(.))
+
+# Do a size ratio filter, keep the fence for the McQueen Lake ecological reserve, 
+# and remove a single offending polygon
+area_perim <- data.frame(
+  rows = as.numeric(rownames(ldb_rra)),
+  id = ldb_rra$id,
+  area = st_area(ldb_rra), 
+  perim = ldb_rra %>% st_cast("MULTILINESTRING") %>% st_length()
+) %>% dplyr::mutate(ratio = as.numeric(area / perim)) %>% 
+  dplyr::mutate(ratio = ifelse(grepl("380b|654d", id), 1, ratio), 
+                area = ifelse(grepl("380b|654d", id), 1, area)) %>% 
+  dplyr::filter(ratio >= 1, ratio < 20, area < 10000, !endsWith(id, c("377b", "2fb", "74ca", "65dd")))
+
+# Filter ldb_rra dataframe using matching rownames from area/perimeter filterings
+ldb_rra <- ldb_rra[area_perim$rows, ]
+
+# Write output
+st_write(ldb_rra, file.path(dir_out, "ldb.gpkg"), layer = "RRAs",
+         delete_layer = TRUE, quiet = TRUE)
+
+```
+
