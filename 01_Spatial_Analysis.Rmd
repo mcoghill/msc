@@ -15,6 +15,7 @@ library(sf)
 library(tidyverse)
 library(foreach)
 library(measurements)
+library(tabulizer)
 
 dir_out <- file.path("./01_Spatial_Data")
 dir.create(dir_out, showWarnings = FALSE)
@@ -135,7 +136,7 @@ bc_iapp <- bcdata::bcdc_query_geodata("10ecf9ad-1555-4043-834a-f5d24a506d59", cr
 # the total area of all polygons. Need to union them because muliple polygons
 # overlap with one another, so if total area was calculated per polygon you get
 # an overinflated area rather than when they are merged together.
-bc_sk <- dplyr::filter(iapp_full, grepl("SK", MAP_LABEL)) %>% 
+bc_sk <- dplyr::filter(bc_iapp, grepl("SK", MAP_LABEL)) %>% 
   st_union()
 
 # Total area of SK invasion in BC
@@ -152,7 +153,7 @@ bc_bgc_subzones <- bec() %>%
 # The IAPP entries have BEC zone info but it's sporadic and incomplete. Instead, 
 # get that information from the actual BEC zone boundaries and calculate the 
 # percentage of a subzone occupied by SK. THIS TOOK ~5 HOURS TO RUN
-bc_sk_by_subzone <- sf::st_set_agr(bgc_subzones, "constant") %>% 
+bc_sk_by_subzone <- sf::st_set_agr(bc_bgc_subzones, "constant") %>% 
   sf::st_intersection(bc_sk) %>% 
   dplyr::mutate(area = conv_unit(units::drop_units(st_area(.)), "m2", "hectare"), 
                 ratio = area / bgc_area * 100) %>% 
@@ -190,36 +191,50 @@ Each zone has very important values for forestry, First Nations, and conservatio
 ```{r}
 
 # Extract plant species column
-bc_invasive_plants <- st_drop_geometry(iapp_full) %>% 
+bc_invasive_plants <- st_drop_geometry(bc_iapp) %>% 
   dplyr::select(MAP_LABEL)
+
+# Get the official plant list from the IAPP, it has species names etc.
+bc_iapp_plant_table <- extract_tables(
+  "https://delivery.apps.gov.bc.ca/pub/iapp_imf/displayLabelLegend.do", 
+  output = "matrix") %>% 
+  lapply(function(x) { # Create dataframes from matrix, table headers are in first row
+    df <- as.data.frame(x)
+    colnames(df) <- df[1, ]
+    df <- df[-1, ]
+  }) %>% 
+  do.call(rbind, args = .) %>% 
+  dplyr::rename_with(make.names) %>% 
+  dplyr::arrange(Map.Label)
+rownames(bc_iapp_plant_table) <- NULL
 
 # Will use the separate function to get columns for different plants, but first
 # need to find out what the longest entry is to find how many columns there will be:
-n_splits <- max(nchar(str_replace_all(bc_invasive_plants$MAP_LABEL, "[^[:alnum:]]", "")), na.rm = TRUE)
-all_plants_wide <- bc_invasive_plants %>% 
-  tidyr::separate(MAP_LABEL, into = paste0("sp", 1:n_splits), sep = " ", extra = "drop")
+n_splits <- max(nchar(str_replace_all(bc_invasive_plants$MAP_LABEL, "[^[:alnum:]]", "")), na.rm = TRUE) / 2
+all_plants <- bc_invasive_plants %>% 
+  tidyr::separate(MAP_LABEL, into = paste0("sp", 1:n_splits), sep = " ", extra = "drop") %>% 
+  apply(MARGIN = 2, FUN = unique) %>% 
+  do.call(c, args = .) %>% 
+  unique() %>% na.omit() %>% grep("NA", ., invert = TRUE, value = TRUE) %>% sort()
 
-all_plants_string <- foreach(i = 1:ncol(all_plants_wide), .combine = rbind) %do% {
-  unique(all_plants_wide[, i]) %>% dplyr::rename(column = 1)
-} %>% grep(pattern = "[^[:alnum:]]", x = unique(.$column), value = TRUE, invert = TRUE) %>% 
-  na.omit()
-
-# There are 185 invasive species recorded in BC. Which ones take up the largest
+# There are 184 invasive species recorded in BC. Which ones take up the largest
 # amount of physical space in BC?
-bc_invasive_plant_areas <- foreach(i = 1:length(all_plants_string), .combine = rbind) %do% {
-  cat(paste0("Working on ", all_plants_string[i], " [", i, " of ", length(all_plants_string), "]\n"))
-  dplyr::filter(iapp_full, grepl(all_plants_string[i], MAP_LABEL)) %>% 
+bc_invasive_plant_areas <- foreach(i = 1:length(all_plants), .combine = rbind) %do% {
+  cat(paste0("Working on ", all_plants[i], " [", i, " of ", length(all_plants), "]\n"))
+  dplyr::filter(bc_iapp, grepl(all_plants[i], MAP_LABEL)) %>% 
     st_union() %>% 
     st_as_sf() %>% 
-    dplyr::mutate(SPECIES = all_plants_string[i], 
+    dplyr::mutate(Map.Label = all_plants[i], 
                   area = conv_unit(units::drop_units(st_area(.)), "m2", "hectare"))
 } %>% dplyr::rename(geometry = x) %>% 
-  dplyr::select(SPECIES, area) %>% 
+  dplyr::select(Map.Label, area) %>% 
+  dplyr::arrange(desc(area)) %>% 
+  st_cast("MULTIPOLYGON") %>% 
+  merge(bc_iapp_plant_table, all.x = TRUE) %>%
+  dplyr::select(c(names(bc_iapp_plant_table), area)) %>% 
   dplyr::arrange(desc(area))
-
-# st_read(file.path(bc_out, "BC_IAPP_by_plant.gpkg"), quiet = TRUE)
-
-# Drop geometry for faster processing
+  
+# Drop geometry for quick viewing of data
 bc_inv_plant_areas_no_geom <- st_drop_geometry(bc_invasive_plant_areas)
 
 # It turns out that spotted and diffuse knapweed are the most invasive plants on
@@ -244,7 +259,7 @@ bc_bgc_zone_data <- st_drop_geometry(bc_bgc_subzones) %>%
 # Concatenate loose results
 bc_stats <- tribble(
   ~stat, ~value, 
-  "n_invasive_species", length(all_plants_string), 
+  "n_invasive_species", length(all_plants), 
   "bc_invaded_ha", bc_total_invaded_area, 
   "bc_invaded_percent", bc_total_invaded_perc, 
   "bc_invaded_SK_ha", bc_sk_invaded_area,
@@ -254,12 +269,46 @@ bc_stats <- tribble(
 
 st_write(bc_invasive_plant_areas, file.path(bc_out, "BC_IAPP_by_plant.gpkg"), 
          delete_layer = TRUE, quiet = TRUE)
+write.csv(bc_inv_plant_areas_no_geom, file.path(bc_out, "BC_IAPP_by_plant.csv"), row.names = FALSE)
 write.csv(bc_bgc_zone_data, file.path(bc_out, "BC_BEC_zone_data.csv"), row.names = FALSE)
 write.csv(bc_stats, file.path(bc_out, "BC_stats.csv"), row.names = FALSE)
 
 ```
 
-The analysis above shows that SK and DK are the most invasive plants in BC. Additionally, even though only 0.05% of the province is covered in SK, all invasive plants cover only 0.145% of the province, thus SK accounts for slightly more than 1/3 of the invasive plant cover in BC
+The analysis above shows that SK and DK are the most invasive plants in BC. Additionally, even though only 0.05% of the province is covered in SK, all invasive plants cover only 0.145% of the province, thus SK accounts for slightly more than 1/3 of the invasive plant cover in BC.
+
+Next, I want to pull in the spatial data gathered from field work and see what I can capture from that:
+
+```{r}
+
+unzip(file.path(dir_out, "field", "Matt.kmz"), exdir = file.path(dir_out, "field"), overwrite = TRUE)
+layers <- st_layers(file.path(dir_out, "field", "doc.kml"))$name
+field_data <- lapply(layers, function (x)
+  st_read(file.path(dir_out, "field", "doc.kml"), layer = x, quiet = TRUE))
+area_of_invasion <- field_data[[which(sapply(field_data, function(x) 
+  st_geometry_type(x, by_geometry = FALSE) == "POLYGON"))]] %>% 
+  st_transform(3005) %>% 
+  st_make_valid()
+sample_sites <- field_data[which(sapply(field_data, function(x) 
+  st_geometry_type(x, by_geometry = FALSE) == "POINT" && any(grepl("Pri|Inv", x$Name))))] %>% 
+  do.call(rbind, .) %>% 
+  st_transform(3005) %>% 
+  st_make_valid()
+
+# Do some exploration of the spatial data here:
+sample_site_exp <- cbind(
+  sample_sites, 
+  within = st_within(sample_sites, area_of_invasion, sparse = FALSE), 
+  distance_to_poly = st_distance(sample_sites, area_of_invasion))
+aoi_within <- st_union(area_of_invasion) %>% 
+  st_intersection(ldb_sk)
+aoi_exp <- area_of_invasion %>% 
+  dplyr::mutate(area = st_area(.)) %>% 
+  dplyr::mutate(within = units::drop_units(st_area(aoi_within) / area)) %>% 
+  dplyr::mutate(beyond = 1 - within)
+
+```
+
 
 Separately, here is some code for finding all range reference areas within a study area (may also include smaller fencing units as well that are used in rangelands). It took a bit of wrangling but this works decently well, I think...
 
