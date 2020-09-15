@@ -1,0 +1,338 @@
+---
+title: "02_Greenhouse_Trials"
+author: "Matt"
+date: "9/14/2020"
+output: html_document
+---
+
+The intention of this document is to perform scientific analysis of the greenhouse trials performed in my MSc. This will include everything from greenhouse temperature data to biomass and carbon sampling as well.
+
+I'll start with biomass collected in the greenhouse. First, load some packages
+
+```{r}
+
+# library(ggplot2)
+# library(ggpubr)
+# library(magick)
+# library(extrafont)
+# library(grid)
+# library(multcompView)
+
+library(tidyverse)
+library(car)
+library(ggplot2) # Does this load with tidyverse?
+library(ggpubr)
+library(magick)
+library(agricolae)
+library(extrafont)
+if(length(fonts()) == 0) font_import(prompt = FALSE)
+loadfonts(device = "win")
+
+
+```
+
+Next, initialize folders and load the data
+
+```{r}
+
+data_dir <- file.path("./02_Greenhouse/data")
+biomass <- read.csv(file.path(data_dir, "Biomass.csv")) %>% 
+  dplyr::mutate(Soil_Type = factor(Soil_Type, levels = c("Invaded", "Pristine")),
+                Soil_Treatment = factor(Soil_Treatment, levels = c("Con", "AC", "Ash")))
+
+```
+
+Let's see if the data are normal or not. This requires separating by species since they have very different growth patterns etc.
+
+For both species, test if residuals are significantly different (lots of variation). If so, the data are not normal and something needs to be done to it.
+
+```{r biomass stats}
+
+normal_test <- sapply(unique(biomass$Species), function (x) {
+  aov <- aov(TotalMass ~ Soil_Type * Soil_Treatment, 
+              data = subset(biomass, Species == x))
+  resid <- residuals(aov)
+  shapiro <- shapiro.test(resid)$p.value
+  levene <- leveneTest(TotalMass ~ Soil_Type * Soil_Treatment,
+                        data = subset(biomass, Species == x))$`Pr(>F)`[1]
+  return(list(aov = aov, shapiro = shapiro, levene = levene))
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+# Neither SK or RF pass the normality test, so I'll transform the data using a 
+# log transformation and see if that works. As an aside, only the RF data had
+# significantly unequal variances, SK was fine.
+
+biomass$LogMass <- log10(biomass$TotalMass + 1)
+normal_test_log <- sapply(unique(biomass$Species), function (x) {
+  aov <- aov(LogMass ~ Soil_Type * Soil_Treatment, 
+              data = subset(biomass, Species == x))
+  resid <- residuals(aov)
+  shapiro <- shapiro.test(resid)$p.value
+  levene <- leveneTest(LogMass ~ Soil_Type * Soil_Treatment,
+                        data = subset(biomass, Species == x))$`Pr(>F)`[1]
+  return(list(aov = aov, shapiro = shapiro, levene = levene))
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+# The results came back passing all assumptions, and now a proper 2-way ANOVA can
+# be carried out:
+biomass_anova <- lapply(normal_test_log, function(x) anova(x$aov))
+
+# In both cases, there is a strong 'Soil_Treatment' effect, and a slight interaction
+# effect ('Soil_Type:Soil_Treatment'). Use a Tukey test to see where exactly
+# the significant differences lie:
+tukey <- lapply(normal_test_log, function(x) TukeyHSD(x$aov))
+
+# Most of the differences are from using AC in the soils (which killed everything).
+
+```
+
+After the stats, let's make some figures from that data:
+
+```{r biomass figures}
+
+# First, let's make bar charts for the biomass, and afterwards a boxplot, then 
+# finally a side-by-side interaction plot. For the bar chart, we need means and
+# standard errors of the LogBiomass data, which means creating a new summarized data table
+biomass_summary <- biomass %>% dplyr::group_by(Soil_Type, Soil_Treatment, Species) %>% 
+  dplyr::summarise(mean = mean(LogMass), se = sd(LogMass) / sqrt(n()), .groups = "drop")
+
+#This basically tells us that rough fescue performed best in invaded soils. Odd, but it's a result.
+#Now, since I mentioned interactions, I should provide interaction plots for visualization purposes
+#I will make the plots and then join them with a common legend afterwards
+interactions <- sapply(unique(biomass_summary$Species), function(x) {
+  p <- ggplot(subset(biomass_summary, Species == x), 
+              aes(Soil_Type, mean, group = Soil_Treatment, linetype = Soil_Treatment)) + 
+    geom_line(size = 1) +
+    geom_point(size = 2) +
+    theme_classic(base_size = 14) +
+    theme(
+      text = element_text(family = "Times New Roman"),
+      legend.position = "none",
+      legend.background = element_rect(
+        fill = "white",
+        size = 1,
+        linetype = "solid",
+        colour = "black"
+      ),
+      legend.title = element_text(face = "bold"),
+      axis.text = element_text(colour = "black"),
+      axis.ticks.x = element_blank(),
+      axis.title = element_text(face = "bold", size = 16),
+      axis.title.y = element_text(margin = margin(t = 0, 10, 0, 0)),
+      axis.line = element_line(size = 1),
+      plot.title = element_text(face = "bold", hjust = 0.5)
+    ) +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, 1)) +
+    scale_x_discrete(labels = c("Invaded", "Pristine")) +
+    scale_linetype_manual(
+      values = c("solid", "dashed", "dotted"),
+      name = "Soil Treatment:",
+      breaks = c("Con", "AC", "Ash"),
+      labels = c("Control", "Activated Carbon", "Ash")
+    ) +
+    xlab("Soil Type") +
+    ylab("Log (Biomass (g) +1)") +
+    ggtitle(ifelse(x == "RF", "Rough Fescue", "Spotted Knapweed"))
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+#Now join those 2 graphs together
+interactions <- ggarrange(plotlist = interactions, common.legend = TRUE, legend = "bottom")
+#Export image at 600px wide x 300px tall
+
+```
+
+Now onto other old code for updating...
+
+```{r Biomass separated}
+
+rf_img <- image_read(
+  "https://live.staticflickr.com/2426/3990317298_1cfbb2e31f_o_d.jpg") %>% 
+  image_rotate(90) %>% 
+  as.raster()
+rf_img_ar <- ncol(rf_img) / nrow(rf_img)
+
+sk_img <- image_read(
+  "https://upload.wikimedia.org/wikipedia/commons/2/2d/Centaurea_maculosa_Bozeman.jpg") %>% 
+  as.raster()
+sk_img_ar <- ncol(rf_img) / nrow(rf_img)
+
+biomass_plot <- sapply(unique(biomass_summary$Species), function(x) {
+  df <- subset(biomass, Species == x) %>% 
+    unite(trt, c("Soil_Type", "Soil_Treatment"), remove = FALSE) %>% 
+    dplyr::mutate(Soil_Treatment = factor(Soil_Treatment, levels = c("AC", "Ash", "Con")))
+  df_summary <- subset(biomass_summary, Species == x) %>% 
+    unite(trt, c("Soil_Type", "Soil_Treatment"), remove = FALSE) %>% 
+    dplyr::mutate(Soil_Treatment = factor(Soil_Treatment, levels = c("AC", "Ash", "Con")))
+  
+  # Get significance letters using HSD.test from agricolae package
+  df_summary <- HSD.test(aov(LogMass ~ trt, data = df),trt = "trt", group = TRUE)$groups %>% 
+    rownames_to_column("trt") %>% 
+    dplyr::select(-LogMass) %>% 
+    merge(df_summary)
+  
+  p <- ggplot(subset(df_summary, Species == x), 
+              aes(Soil_Treatment, mean, fill = Soil_Type)) +
+    geom_bar(
+      stat = "identity",
+      position = "dodge",
+      colour = "black",
+      size = 1) +
+    geom_errorbar(
+      aes(ymin = mean - se, ymax = mean + se),
+      size = 1,
+      width = 0.3,
+      position = position_dodge(0.9)) +
+    ggtitle(ifelse(x == "RF", "Rough Fescue", "Spotted Knapweed")) +
+    xlab("Soil Amendment") +
+    ylab("Log (Biomass (g) + 1)") +
+    scale_fill_manual(
+      values = c("#5a5a5a", "#adadad"),
+      breaks = c("Invaded", "Pristine"),
+      labels = c("Invaded", "Pristine"),
+      name = "Soil Type:") +
+    theme_classic(base_size = 14) +
+    theme(
+      rect = element_rect(fill = "transparent"),
+      text = element_text(family = "Times New Roman"),
+      legend.position = c(0.12, 0.88),
+      legend.background = element_rect(
+        fill = "white",
+        size = 1,
+        linetype = "solid",
+        colour = "black"),
+      legend.title = element_text(face = "bold", size = 16),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.text = element_text(colour = "black"),
+      axis.ticks.x = element_blank(),
+      axis.title = element_text(face = "bold", size = 16),
+      axis.title.y = element_text(margin = margin(t = 0, 10, 0, 0)),
+      axis.line = element_line(size = 1),
+      plot.title = element_text(face = "bold", hjust = 0.5)) +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, 1)) +
+    scale_x_discrete(labels = c(AC = "AC", Ash = "Ash", Con = "Control")) +
+    geom_text(
+      aes(label = groups, y = mean + se),
+      position = position_dodge(0.9),
+      vjust = -0.5,
+      family = "serif", 
+      size = 5)
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+biomass_plot <- ggarrange(plotlist = biomass_plot, common.legend = TRUE, legend = "bottom") +
+  ggsave(file.path(data_dir, "bmass.png"), width = 6, height = 3, dpi = 300)
+
+# If images are to be included, run the following lines:
+final <- biomass_plot + 
+  annotation_raster(rf_img, xmin = 0.14, 
+                    xmax = 0.24,
+                    ymin = 0.6,
+                    ymax = 0.85) + 
+  annotation_raster(sk_img, xmin = 0.64, 
+                    xmax = 0.74,
+                    ymin = 0.6,
+                    ymax = 0.85) + 
+  ggsave(file.path(data_dir, "bmass_with_images.png"), width = 6, height = 3, dpi = 300)
+
+```
+
+Shifting gears to the elemental analyzer data now:
+
+```{r}
+
+analyzer <- read.csv(file.path(data_dir, "Analyzer.csv"))
+
+elements <- names(dplyr::select(analyzer, where(is.numeric)))
+el_aov <- sapply(elements, function(x) {
+  form <- as.formula(paste0(x, "~ Soil_Type * Soil_Treatment"))
+  aov(form, data = analyzer)
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+el_residuals <- lapply(el_aov, residuals)
+el_shapiro <- lapply(el_residuals, shapiro.test)
+el_levine <- sapply(elements, function(x) {
+  form <- as.formula(paste0(x, "~ Soil_Type * Soil_Treatment"))
+  leveneTest(form, data = analyzer)
+}, simplify = FALSE, USE.NAMES = TRUE)
+el_anova <- lapply(el_aov, anova)
+el_tukey <- lapply(el_aov, TukeyHSD)
+
+analyzer_summary <- group_by(analyzer, Soil_Type, Soil_Treatment) %>% 
+  dplyr::summarise(across(where(is.numeric), list(mean = mean, se = ~sd(.x) / sqrt(n()))), .groups = "drop")
+
+analyzer_plots <- sapply(elements, function(x) {
+  df <- dplyr::select(analyzer, c(Soil_Type, Soil_Treatment, all_of(x))) %>% 
+    unite(trt, c("Soil_Type", "Soil_Treatment"), remove = FALSE) %>% 
+    dplyr::mutate(Soil_Treatment = factor(Soil_Treatment, levels = c("AC", "Ash", "Con"))) %>% 
+    dplyr::rename(data = 4)
+  
+  df_summary <- dplyr::select(analyzer_summary, c(Soil_Type, Soil_Treatment, starts_with(x))) %>% 
+    dplyr::rename(mean = 3, se = 4) %>% 
+    dplyr::mutate(Soil_Treatment = factor(Soil_Treatment, levels = c("AC", "Ash", "Con"))) %>% 
+    unite(trt, c("Soil_Type", "Soil_Treatment"), remove = FALSE)
+  
+  # Get significance letters using HSD.test from agricolae package
+  df_summary <- HSD.test(aov(data ~ trt, data = df), trt = "trt", group = TRUE)$groups %>% 
+    rownames_to_column("trt") %>% 
+    dplyr::select(-data) %>% 
+    merge(df_summary)
+  
+  p <- ggplot(df_summary, aes(Soil_Type, mean, fill = Soil_Treatment)) + 
+    geom_bar(stat = "identity", position = "dodge", colour = "black", size = 1) +
+    geom_errorbar(aes(ymin = mean - se, ymax = mean + se), 
+                  size = 1, width = 0.3, position = position_dodge(0.9)) +
+    xlab("Soil Site")+
+    ylab(paste0("Total ", x, " (%)")) +
+    theme_classic(base_size = 16) +
+    theme(
+      text = element_text(family = "Times New Roman"),
+      legend.position = c(0.18, 0.88), 
+      legend.background = element_rect(
+        fill = "white", size = 1,linetype = "solid", colour = "black"),
+      legend.title = element_text(face = "bold", size = 18),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.text = element_text(colour = "black"),
+      axis.ticks.x = element_blank(),
+      axis.title = element_text(face = "bold", size = 18)) + 
+    scale_fill_manual(
+      values = c("dimgray", "darkgray", "gainsboro"),
+      breaks = c("AC","Ash","Con"),
+      labels = c("Activated Carbon", "Ash", "Control"),
+      name = "Soil Amendment") +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, max(ceiling(df$data))))+
+    scale_x_discrete(labels = c(Invaded = "Invaded", Pristine = "Pristine")) +
+    geom_text(aes(label = groups, y = mean + se), position = position_dodge(0.9), 
+              vjust= -0.5, family = "serif", size = 5)
+  
+  p2 <- ggplot(df, aes(Soil_Type, data, fill = Soil_Treatment)) +
+  geom_boxplot(lwd = 0.6, color = "black", width = 1) +
+  xlab("Soil Site") +
+  ylab(paste0("Total ", x, " (%)"))  +
+  theme_classic(base_size = 14) +
+  theme(
+    text = element_text(family="Times New Roman"), 
+    legend.position = c(0.18, 0.88),
+    legend.background = element_rect(
+      fill = "white",size = 1,linetype = "solid", colour = "black"),
+    legend.title = element_text(face = "bold",size = 16), 
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(colour = "black"),
+    axis.ticks.x = element_blank(),
+    axis.title = element_text(face = "bold",size = 16),
+    axis.title.y = element_text(margin = margin(t = 0, 10, 0, 0)),
+    axis.line = element_line(size = 1)) +
+  scale_fill_manual(
+    values = c("gray99", "gray66", "gray33"),
+    breaks = c("AC", "Ash", "Con"),
+    labels = c("Control", "Activated Carbon", "Ash"), 
+    name = "Soil Amendment") +
+  scale_x_discrete(labels = c(INV = "Invaded", PRI = "Pristine")) +
+  scale_y_continuous(expand = c(0, 0), limits = c(min(floor(df$data)), max(ceiling(df$data))))
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+final <- ggarrange(plotlist = analyzer_plots, common.legend = TRUE, legend = "bottom")
+
+```
+
