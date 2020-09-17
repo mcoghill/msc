@@ -167,9 +167,10 @@ native_richness <- lapply(cov_native_pivot, function(x)
 
 # Combine the lists and create tables for invasive plant richness and native plant 
 # richness
-ls <- list(inv_richness = invasive_richness, nat_richness = native_richness)
-richness_ls <- lapply(ls, function(x)
-  do.call(rbind, x) %>% 
+richness_ls <- lapply(
+  list(inv_richness = invasive_richness, nat_richness = native_richness),
+  function(x)
+    do.call(rbind, x) %>% 
     separate(Site_ID, c("Site", "Rep"), remove = FALSE) %>% 
     pivot_longer(names(.)[4], names_to = "metric") %>% 
     dplyr::mutate(Rep = as.numeric(Rep), 
@@ -369,7 +370,7 @@ litter <- read.csv(file.path(data_dir, "litter_bg_data.csv"), header = TRUE) %>%
   pivot_wider(Site_ID, names_from = Common.Name, values_from = Cover) %>% 
   replace(is.na(.), 0) %>% 
   separate(Site_ID, c("Site", "Rep"), remove = FALSE) %>% 
-  mutate(Rep = as.numeric(Rep))
+  mutate(Rep = as.numeric(Rep), Site = as.factor(Site))
 
 litter_assumptions <- sapply(c("Litter", "Bare Ground"), function(x) {
   df <- dplyr::rename(litter, data = all_of(x))
@@ -414,11 +415,15 @@ bg_analysis <- wilcox.test(`Bare Ground` ~ Site, data = litter) %>%
 
 # Write outputs
 write.csv(litter_normal_analysis, 
-          file.path(results_dir, "03a_litter_bg_norm_assumption.csv"), row.names = TRUE)
+          file.path(results_dir, "03a_litter_bg_norm_assumption.csv"), 
+          row.names = TRUE)
 write.csv(litter_var_eq_analysis, 
-          file.path(results_dir, "03b_litter_bg_var_eq_assumption.csv"), row.names = TRUE)
-write.csv(litter_analysis, file.path(results_dir, "03c_litter_ttest.csv"), row.names = FALSE)
-write.csv(bg_analysis, file.path(results_dir, "03d_bg_Mann_Whitney.csv"), row.names = FALSE)
+          file.path(results_dir, "03b_litter_bg_var_eq_assumption.csv"), 
+          row.names = TRUE)
+write.csv(litter_analysis, file.path(results_dir, "03c_litter_ttest.csv"), 
+          row.names = FALSE)
+write.csv(bg_analysis, file.path(results_dir, "03d_bg_Mann_Whitney.csv"), 
+          row.names = FALSE)
 
 
 ```
@@ -429,21 +434,27 @@ Next, there were ground temperature recordings taken for Jordann's project in 20
 
 temperature_dir <- file.path(data_dir, "Temperature Data 2017")
 
+# Load the study area boundary
 aoi <- st_read("./01_Spatial_Data/field/doc.kml", layer = "Matt.kmz", quiet = TRUE) %>% 
   st_transform(3005) %>% 
   st_make_valid() %>% 
   st_geometry()
 
+# Load the thermochron location points by unqipping the kmz and loading the 
+# subsequent kml
 unzip(file.path(data_dir, "Temperature Data 2017", "LDB Knapweed Study Sites.kmz"), 
       exdir = temperature_dir, overwrite = TRUE)
 
 temp_sites <- st_read(file.path(temperature_dir, "doc.kml"), quiet = TRUE) %>% 
   st_transform(3005)
 
-# Sites 1, 2, 12, 17, and 18 all have no recorded SK (aka pristine sites)
+# Get the temperature stations within the study area
 sites_within <- st_set_agr(temp_sites, "constant") %>% 
   st_intersection(aoi) %>% 
   dplyr::mutate(Type = "Invaded")
+
+# Sites 1, 2, 12, 17, and 18 all have no recorded SK (aka these are pristine sites),
+# so filter to those sites only and take the nearest two to the AOI polygon 
 sites_near <- data.frame(Name = temp_sites$Name, dist = as.numeric(st_distance(aoi, temp_sites))) %>% 
   dplyr::arrange(dist) %>% 
   dplyr::filter(Name %in% paste("Site", c(1, 2, 12, 17, 18))) %>% 
@@ -452,6 +463,8 @@ sites_near <- data.frame(Name = temp_sites$Name, dist = as.numeric(st_distance(a
   st_sf(sf_column_name = "geometry") %>% 
   st_zm() %>% 
   dplyr::mutate(Type = "Pristine")
+
+# Combine the filtered points - these are the weather stations that will be used
 site_list <- bind_rows(sites_near, sites_within)
 
 # Now, read CSV files matching the selected sites
@@ -470,7 +483,7 @@ temp_data <- sapply(unique(site_list$Type), function(x) {
       dplyr::rename(time = Date...Time.2, temp = Temperature...C.)
   } %>% group_by(DateTime, Date, month, day, time) %>% 
     dplyr::summarise(temp = mean(temp), .groups = "drop") %>% 
-    dplyr::mutate(Type = x)
+    dplyr::mutate(Type = as.factor(x))
 }, simplify = FALSE, USE.NAMES = TRUE)
 
 temp_data_df <- do.call(rbind, temp_data)

@@ -11,22 +11,17 @@ I'll start with biomass collected in the greenhouse. First, load some packages
 
 ```{r}
 
-# library(ggplot2)
-# library(ggpubr)
-# library(magick)
-# library(extrafont)
-# library(grid)
-# library(multcompView)
-
 library(tidyverse)
+library(broom)
 library(car)
 library(ggpubr)
 library(magick)
 library(agricolae)
 library(extrafont)
-if(length(fonts()) == 0) font_import(prompt = FALSE)
-loadfonts(device = "win")
-
+if(any(!fonts() %in% unlist(windowsFonts()))) {
+  font_import(prompt = FALSE)
+  loadfonts(device = "win")
+} 
 
 ```
 
@@ -36,8 +31,11 @@ Next, initialize folders and load the data
 
 data_dir <- file.path("./02_Greenhouse/data")
 plot_dir <- file.path("./02_Greenhouse/plots")
+results_dir <- file.path("./02_Greenhouse/results")
 dir.create(plot_dir, showWarnings = FALSE)
-biomass <- read_csv(file.path(data_dir, "greenhouse_raw.csv"), col_types = NULL)
+dir.create(results_dir, showWarnings = FALSE)
+
+biomass <- read.csv(file.path(data_dir, "greenhouse_raw.csv"), header = TRUE) %>% 
   dplyr::mutate(Soil_Type = factor(Soil_Type, levels = c("Invaded", "Pristine")),
                 Soil_Treatment = factor(Soil_Treatment, levels = c("Con", "AC", "Ash")), 
                 AboveMass = ifelse(AboveMass == 0.001, 0, AboveMass),
@@ -53,41 +51,74 @@ For both species, test if residuals are significantly different (lots of variati
 
 ```{r biomass stats}
 
-normal_test <- sapply(unique(biomass$Species), function (x) {
-  aov <- aov(TotalMass ~ Soil_Type * Soil_Treatment, 
-              data = subset(biomass, Species == x))
+bmass_assumptions <- sapply(unique(biomass$Species), function (x) {
+  df <- dplyr::filter(biomass, Species == x)
+  aov <- aov(TotalMass ~ Soil_Type * Soil_Treatment, data = df)
   resid <- residuals(aov)
-  shapiro <- shapiro.test(resid)$p.value
-  levene <- leveneTest(TotalMass ~ Soil_Type * Soil_Treatment,
-                        data = subset(biomass, Species == x))$`Pr(>F)`[1]
-  return(list(aov = aov, shapiro = shapiro, levene = levene))
+  shapiro <- shapiro.test(resid) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))
+  levene <- leveneTest(TotalMass ~ Soil_Type * Soil_Treatment, data = df) %>% 
+    drop_na()
+  return(list(shapiro = shapiro, levene = levene))
 }, simplify = FALSE, USE.NAMES = TRUE)
+
+bmass_normal_analysis <- lapply(bmass_assumptions, "[[", 1) %>% do.call(rbind, .)
+bmass_var_eq_analysis <- lapply(bmass_assumptions, "[[", 2) %>% do.call(rbind, .)
 
 # Neither SK or RF pass the normality test, so I'll transform the data using a 
 # log transformation and see if that works. As an aside, only the RF data had
 # significantly unequal variances, SK was fine.
 
 biomass$LogMass <- log10(biomass$TotalMass + 1)
-normal_test_log <- sapply(unique(biomass$Species), function (x) {
-  aov <- aov(LogMass ~ Soil_Type * Soil_Treatment, 
-              data = subset(biomass, Species == x))
+bmass_log_assumptions <- sapply(unique(biomass$Species), function (x) {
+  df <- dplyr::filter(biomass, Species == x)
+  aov <- aov(LogMass ~ Soil_Type * Soil_Treatment, data = df)
   resid <- residuals(aov)
-  shapiro <- shapiro.test(resid)$p.value
-  levene <- leveneTest(LogMass ~ Soil_Type * Soil_Treatment,
-                        data = subset(biomass, Species == x))$`Pr(>F)`[1]
-  return(list(aov = aov, shapiro = shapiro, levene = levene))
+  shapiro <- shapiro.test(resid) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))
+  levene <- leveneTest(LogMass ~ Soil_Type * Soil_Treatment, data = df) %>% 
+    drop_na()
+  return(list(shapiro = shapiro, levene = levene))
 }, simplify = FALSE, USE.NAMES = TRUE)
 
+bmass_log_normal_analysis <- lapply(bmass_log_assumptions, "[[", 1) %>% do.call(rbind, .)
+bmass_log_var_eq_analysis <- lapply(bmass_log_assumptions, "[[", 2) %>% do.call(rbind, .)
+
 # The results came back passing all assumptions, and now a proper 2-way ANOVA can
-# be carried out:
-biomass_anova <- lapply(normal_test_log, function(x) anova(x$aov))
+# be carried out (and post hoc analysis, Tukey HSD):
+bmass_analysis <- sapply(unique(biomass$Species), function(x) {
+  df <- dplyr::filter(biomass, Species == x)
+  aov <- aov(LogMass ~ Soil_Type * Soil_Treatment, data = df)
+  anova <- anova(aov) %>% tidy() %>% mutate(SPECIES = x)
+  tukey <- TukeyHSD(aov) %>% tidy() %>% mutate(SPECIES = x)
+  return(list(anova = anova, tukey = tukey))
+}, simplify = FALSE, USE.NAMES = TRUE)
 
 # In both cases, there is a strong 'Soil_Treatment' effect, and a slight interaction
-# effect ('Soil_Type:Soil_Treatment'). Use a Tukey test to see where exactly
-# the significant differences lie:
-tukey <- lapply(normal_test_log, function(x) TukeyHSD(x$aov))
-
+# effect ('Soil_Type:Soil_Treatment').
 # Most of the differences are from using AC in the soils (which killed everything).
+
+# Write outputs
+write.csv(bmass_normal_analysis, file.path(
+  results_dir, "01a_biomass_normal_assumptions.csv"), row.names = TRUE)
+write.csv(bmass_var_eq_analysis, file.path(
+  results_dir, "01b_biomass_var_eq_assumptions.csv"), row.names = TRUE)
+
+unlink(file.path(results_dir, c("01c_biomass_anova.csv", "01d_biomass_tukey.csv")))
+bmass_anova <- lapply(bmass_analysis, "[[", "anova") %>% 
+  lapply(function(x) {
+    df <- x
+    df[nrow(df) + 1, ] <- NA
+    write.table(df, file.path(results_dir, "01c_biomass_anova.csv"), append = TRUE, 
+                row.names = FALSE, sep = ",", na = "")
+    return(x) 
+  })
+bmass_tukey <- lapply(bmass_analysis, "[[", "tukey") %>% 
+  lapply(function(x) {
+    df <- x
+    df[nrow(df) + 1, ] <- NA
+    write.table(df, file.path(results_dir, "01d_biomass_tukey.csv"), append = TRUE, 
+                row.names = FALSE, sep = ",", na = "")
+    return(x) 
+  })
 
 ```
 
@@ -98,7 +129,8 @@ After the stats, let's make some figures from that data:
 # First, let's make bar charts for the biomass, and afterwards a boxplot, then 
 # finally a side-by-side interaction plot. For the bar chart, we need means and
 # standard errors of the LogBiomass data, which means creating a new summarized data table
-biomass_summary <- biomass %>% dplyr::group_by(Soil_Type, Soil_Treatment, Species) %>% 
+biomass_summary <- biomass %>% 
+  dplyr::group_by(Soil_Type, Soil_Treatment, Species) %>% 
   dplyr::summarise(mean = mean(LogMass), se = sd(LogMass) / sqrt(n()), .groups = "drop")
 
 #This basically tells us that rough fescue performed best in invaded soils. Odd, but it's a result.
@@ -148,7 +180,7 @@ final <- ggarrange(plotlist = interactions, common.legend = TRUE, legend = "bott
 
 ```
 
-Now onto other old code for updating...
+Now, plot biomass separated by species. There is also the option of adding an image of the plant to the graphs as well
 
 ```{r Biomass separated}
 
@@ -248,7 +280,8 @@ I need to do some stuff with survival of the planted greenhouse plants as well:
 
 ```{r}
 
-surv <- read_csv(file.path(data_dir, "greenhouse_raw.csv"), col_types = NULL) %>% 
+# Read in the survival data from the same spreadsheet
+surv <- read.csv(file.path(data_dir, "greenhouse_raw.csv"), header = TRUE) %>% 
   dplyr::select(-c(AboveMass, BelowMass, Rep)) %>% 
   dplyr::mutate(Soil_Type = factor(Soil_Type, levels = c("Invaded", "Pristine")),
                 Soil_Treatment = factor(Soil_Treatment, levels = c("Con", "AC", "Ash")), 
@@ -258,42 +291,154 @@ surv <- read_csv(file.path(data_dir, "greenhouse_raw.csv"), col_types = NULL) %>
                 germ_surv = ifelse(Survival == 0 & Germinants == 0, 0, 
                                    Survival / Germinants))
 
+# Create summarized results
 surv_summary <- group_by(surv, Soil_Type, Soil_Treatment, Species) %>% 
   summarise(across(c(germ_rat, deaths, trial_surv, germ_surv), 
                    list(mean = mean, se = ~sd(.x) / sqrt(n()))), .groups = "drop")
 
+# Generate list of names that will be used to filter and attribute things later
 plots <- names(surv_summary)[endsWith(names(surv_summary), "mean")]
 
-aovs <- sapply(plots, function(x) {
+surv_aovs <- sapply(plots, function(x) {
   df <- dplyr::rename(surv, data = all_of(gsub("_mean", "", x)))
-  iter <- sapply(unique(df$Species), function(x) {
-    aov <- aov(data ~ Soil_Type * Soil_Treatment, 
-               data = subset(df, Species == x))
+  iter <- sapply(unique(df$Species), function(y) {
+    df2 <- dplyr::filter(df, Species == y)
+    aov <- aov(data ~ Soil_Type * Soil_Treatment, data = df2)
     resid <- residuals(aov)
-    shapiro <- shapiro.test(resid)$p.value
-    levene <- leveneTest(data ~ Soil_Type * Soil_Treatment,
-                         data = subset(df, Species == x))$`Pr(>F)`[1]
-    return(list(aov = aov, shapiro = shapiro, levene = levene))
+    shapiro <- shapiro.test(resid) %>% tidy() %>% 
+      dplyr::mutate(stat_name = names(statistic), SPECIES = y, test_var = x)
+    levene <- leveneTest(data ~ Soil_Type * Soil_Treatment, data = df2) %>% 
+      drop_na() %>% dplyr::mutate(SPECIES = y, test_var = x)
+    return(list(shapiro = shapiro, levene = levene))
   }, simplify = FALSE, USE.NAMES = TRUE)
 }, simplify = FALSE, USE.NAMES = TRUE)
 
+# Summarized dataframes of normality and equal variance assumptions
+surv_shapiro <- c(
+  lapply(surv_aovs, "[[", c(1, 1)) %>% magrittr::set_names(paste0(names(.), "_RF")), 
+  lapply(surv_aovs, "[[", c(2, 1)) %>% magrittr::set_names(paste0(names(.), "_SK"))) %>% 
+  do.call(rbind, .)
+surv_levene <- c(
+  lapply(surv_aovs, "[[", c(1, 2)) %>% magrittr::set_names(paste0(names(.), "_RF")), 
+  lapply(surv_aovs, "[[", c(2, 2)) %>% magrittr::set_names(paste0(names(.), "_SK"))) %>% 
+  do.call(rbind, .)
+
+# Most of the assumptions were violated, so try transforming it and see if that helps
 surv_log <- mutate(surv, across(starts_with(gsub("_mean", "", plots)), ~log10(.x + 1)))
 surv_log_summary <- group_by(surv_log, Soil_Type, Soil_Treatment, Species) %>% 
   summarise(across(c(germ_rat, deaths, trial_surv, germ_surv), 
                    list(mean = mean, se = ~sd(.x) / sqrt(n()))), .groups = "drop")
 
-aovs_log <- sapply(plots, function(x) {
+surv_log_aovs <- sapply(plots, function(x) {
   df <- dplyr::rename(surv_log, data = all_of(gsub("_mean", "", x)))
-  iter <- sapply(unique(df$Species), function(x) {
-    aov <- aov(data ~ Soil_Type * Soil_Treatment, 
-               data = subset(df, Species == x))
+  iter <- sapply(unique(df$Species), function(y) {
+    df2 <- dplyr::filter(df, Species == y)
+    aov <- aov(data ~ Soil_Type * Soil_Treatment, data = df2)
     resid <- residuals(aov)
-    shapiro <- shapiro.test(resid)$p.value
-    levene <- leveneTest(data ~ Soil_Type * Soil_Treatment,
-                         data = subset(df, Species == x))$`Pr(>F)`[1]
-    return(list(aov = aov, shapiro = shapiro, levene = levene))
+    shapiro <- shapiro.test(resid) %>% tidy() %>% 
+      dplyr::mutate(stat_name = names(statistic), SPECIES = y, test_var = x)
+    levene <- leveneTest(data ~ Soil_Type * Soil_Treatment, data = df2) %>% 
+      drop_na() %>% dplyr::mutate(SPECIES = y, test_var = x)
+    return(list(shapiro = shapiro, levene = levene))
   }, simplify = FALSE, USE.NAMES = TRUE)
 }, simplify = FALSE, USE.NAMES = TRUE)
+
+# Summarized dataframes of normality and equal variance assumptions
+surv_log_shapiro <- c(
+  lapply(surv_log_aovs, "[[", c(1, 1)) %>% magrittr::set_names(paste0(names(.), "_RF")), 
+  lapply(surv_log_aovs, "[[", c(2, 1)) %>% magrittr::set_names(paste0(names(.), "_SK"))) %>% 
+  do.call(rbind, .)
+surv_log_levene <- c(
+  lapply(surv_log_aovs, "[[", c(1, 2)) %>% magrittr::set_names(paste0(names(.), "_RF")), 
+  lapply(surv_log_aovs, "[[", c(2, 2)) %>% magrittr::set_names(paste0(names(.), "_SK"))) %>% 
+  do.call(rbind, .)
+
+# Log transforming helped with some of the data to be able to perform an ANOVA;
+# Other tests will need to be made using the non parametric Friedman 2-way ANOVA
+# Define which are good for ANOVA vs. not
+surv_which_anova <- dplyr::select(surv_log_shapiro, test_var, p.value, SPECIES) %>% 
+  merge(dplyr::select(surv_log_levene, test_var, `Pr(>F)`, SPECIES), by = c("SPECIES", "test_var")) %>% 
+  dplyr::mutate(anova = ifelse(p.value < 0.05 & `Pr(>F)` < 0.05, TRUE, FALSE), 
+                test_var = gsub("_mean", "", test_var))
+
+surv_anova_data <- dplyr::filter(surv_which_anova, anova == TRUE)
+surv_anova <- lapply(1:nrow(surv_anova_data), function(x) {
+  df <- dplyr::filter(surv_log, Species == surv_anova_data$SPECIES[x]) %>% 
+    dplyr::select(Soil_Type, Soil_Treatment, all_of(surv_anova_data$test_var[x])) %>% 
+    dplyr::rename(data = surv_anova_data$test_var[x])
+  aov <- aov(data ~ Soil_Type * Soil_Treatment, data = df)
+  anova <- anova(aov) %>% tidy() %>% 
+    mutate(id = paste0("log_", surv_anova_data$test_var[x], "_", surv_anova_data$SPECIES[x]))
+  tukey <- TukeyHSD(aov) %>% tidy() %>% 
+    mutate(id = paste0("log_", surv_anova_data$test_var[x], "_", surv_anova_data$SPECIES[x]))
+  return(list(anova = anova, tukey = tukey))
+}) %>% magrittr::set_names(paste0("log_", surv_anova_data$test_var, "_", surv_anova_data$SPECIES))
+
+surv_friedman_data <- dplyr::filter(surv_which_anova, anova == FALSE)
+surv_friedman <- lapply(1:nrow(surv_friedman_data), function(x) {
+  df <- dplyr::filter(surv, Species == surv_friedman_data$SPECIES[x]) %>% 
+    dplyr::select(Soil_Type, Soil_Treatment, all_of(surv_friedman_data$test_var[x])) %>% 
+    dplyr::rename(data = surv_friedman_data$test_var[x])
+  df_summary <- dplyr::filter(surv_summary, Species == surv_friedman_data$SPECIES[x]) %>% 
+    dplyr::select(Soil_Type, Soil_Treatment, all_of(paste0(surv_friedman_data$test_var[x], "_mean"))) %>% 
+    dplyr::rename(data = paste0(surv_friedman_data$test_var[x], "_mean"))
+  friedman <- friedman.test(data ~ Soil_Treatment | Soil_Type, data = df_summary) %>% 
+    tidy() %>% 
+    mutate(id = paste0(surv_friedman_data$test_var[x], "_", surv_friedman_data$SPECIES[x]))
+  aov <- aov(data ~ Soil_Type * Soil_Treatment, data = df)
+  tukey <- TukeyHSD(aov) %>% tidy() %>% 
+    mutate(id = paste0(surv_friedman_data$test_var[x], "_", surv_friedman_data$SPECIES[x]))
+  return(list(friedman = friedman, tukey = tukey))
+}) %>% magrittr::set_names(paste0(surv_friedman_data$test_var, "_", surv_friedman_data$SPECIES))
+
+surv_friedman_analysis <- lapply(surv_friedman, "[[", "friedman") %>% do.call(rbind, .)
+surv_friedman_tukey <- lapply(surv_friedman, "[[", "tukey") 
+
+# While looking into the matter, a non-parametric 2-way ANOVA is tricky with replication,
+# so it had to be performed on mean data. Also, it doesn't produce interactions, 
+# I made those the standard way which may be incorrect, not sure.
+
+# Save outputs
+unlink(file.path(results_dir, paste0("02e_survival_anova.csv", 
+                                     "02f_survival_tukey.csv", 
+                                     "02h_survival_friedman_tukey.csv")))
+write.csv(surv_shapiro, file.path(
+  results_dir, "02a_survival_normal_assumptions.csv"), row.names = TRUE)
+write.csv(surv_levene, file.path(
+  results_dir, "02b_survival_var_eq_assumptions.csv"), row.names = TRUE)
+write.csv(surv_log_shapiro, file.path(
+  results_dir, "02c_survival_log_normal_assumptions.csv"), row.names = TRUE)
+write.csv(surv_log_levene, file.path(
+  results_dir, "02d_survival_log_var_eq_assumptions.csv"), row.names = TRUE)
+surv_anova_out <- lapply(surv_anova, "[[", "anova") %>% 
+  lapply(function(x) {
+    df <- x
+    df[nrow(df) + 1, ] <- NA
+    write.table(df, file.path(results_dir, "02e_survival_anova.csv"), append = TRUE, 
+                row.names = FALSE, sep = ",", na = "")
+    return(x)})
+surv_tukey_out <- lapply(surv_anova, "[[", "tukey") %>% 
+  lapply(function(x) {
+    df <- x
+    df[nrow(df) + 1, ] <- NA
+    write.table(df, file.path(results_dir, "02f_survival_tukey.csv"), append = TRUE, 
+                row.names = FALSE, sep = ",", na = "")
+    return(x)})
+
+write.csv(surv_friedman_analysis, file.path(
+  results_dir, "02g_survival_friedman.csv"), row.names = FALSE)
+lapply(surv_friedman_tukey, function(x) {
+    df <- x
+    df[nrow(df) + 1, ] <- NA
+    write.table(df, file.path(results_dir, "02h_survival_friedman_tukey.csv"), append = TRUE, 
+                row.names = FALSE, sep = ",", na = "")
+    return(x)})
+
+```
+
+Now plot the survival data
+
+```{r survival plots}
 
 surv_plots <- sapply(plots, function(x) {
   
@@ -312,14 +457,14 @@ surv_plots <- sapply(plots, function(x) {
   
   iter <- sapply(unique(df$Species), function(y) {
     df2 <- dplyr::filter(df, Species == y)
-    df_summary2 <- dplyr::filter(df_summary, Species == y)
+    df2_summary <- dplyr::filter(df_summary, Species == y)
     
-    df_summary2 <- HSD.test(aov(data ~ trt, data = df2), trt = "trt", group = TRUE)$groups %>% 
+    df2_summary <- HSD.test(aov(data ~ trt, data = df2), trt = "trt", group = TRUE)$groups %>% 
       rownames_to_column("trt") %>% 
       dplyr::select(-data) %>% 
-      merge(df_summary2)
+      merge(df2_summary)
     
-    p <- ggplot(df_summary2, aes(Soil_Type, mean, fill = Soil_Treatment)) + 
+    p <- ggplot(df2_summary, aes(Soil_Type, mean, fill = Soil_Treatment)) + 
       geom_bar(stat = "identity", position = "dodge", colour = "black", size = 1) +
       geom_errorbar(aes(ymin = mean - se, ymax = mean + se),
                     size = 1, width = 0.3, position = position_dodge(0.9)) +
@@ -371,8 +516,6 @@ final <- ggarrange(plotlist = surv_plots, common.legend = TRUE, legend = "bottom
 
 ```
 
-
-
 Shifting gears to the elemental analyzer data now:
 
 ```{r}
@@ -386,17 +529,44 @@ el_aov <- sapply(elements, function(x) {
 }, simplify = FALSE, USE.NAMES = TRUE)
 
 el_residuals <- lapply(el_aov, residuals)
-el_shapiro <- lapply(el_residuals, shapiro.test)
+el_shapiro <- lapply(el_residuals, function(x)
+  shapiro.test(x) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))) %>% 
+  do.call(rbind, .)
 el_levine <- sapply(elements, function(x) {
   form <- as.formula(paste0(x, "~ Soil_Type * Soil_Treatment"))
-  leveneTest(form, data = analyzer)
-}, simplify = FALSE, USE.NAMES = TRUE)
-el_anova <- lapply(el_aov, anova)
-el_tukey <- lapply(el_aov, TukeyHSD)
+  leveneTest(form, data = analyzer) %>% tidy() %>% drop_na()
+}, simplify = FALSE, USE.NAMES = TRUE) %>% 
+  do.call(rbind, .)
 
+# All assumptions are validated, good to use ANOVA
+el_anova <- lapply(seq_along(el_aov), function(x) 
+  anova(el_aov[[x]]) %>% tidy() %>% mutate(id = names(el_aov)[x])) %>% 
+  magrittr::set_names(names(el_aov))
+el_tukey <- lapply(seq_along(el_aov), function(x) 
+  TukeyHSD(el_aov[[x]]) %>% tidy() %>% mutate(id = names(el_aov)[x])) %>% 
+  magrittr::set_names(names(el_aov))
+
+# Create summary data for plotting
 analyzer_summary <- group_by(analyzer, Soil_Type, Soil_Treatment) %>% 
   dplyr::summarise(across(where(is.numeric), list(mean = mean, se = ~sd(.x) / sqrt(n()))), .groups = "drop")
 
+# Write outputs
+write.csv(el_shapiro, file.path(
+  results_dir, "03a_soil_normality_assumptions.csv"), row.names = TRUE)
+write.csv(el_levine, file.path(
+  results_dir, "03b_soil_eq_vars_assumptions.csv"), row.names = TRUE)
+lapply(el_anova, function(x) {
+  df <- x
+  df[nrow(df) + 1, ] <- NA
+  write.table(df, file.path(results_dir, "03c_soil_anova.csv"), append = TRUE, 
+              row.names = TRUE, sep = ",", na = "")})
+lapply(el_tukey, function(x) {
+  df <- x
+  df[nrow(df) + 1, ] <- NA
+  write.table(df, file.path(results_dir, "03c_soil_tukey.csv"), append = TRUE, 
+              row.names = FALSE, sep = ",", na = "")})
+
+# Plot results
 analyzer_plots <- sapply(elements, function(x) {
   df <- dplyr::select(analyzer, c(Soil_Type, Soil_Treatment, all_of(x))) %>% 
     unite(trt, c("Soil_Type", "Soil_Treatment"), remove = FALSE) %>% 
