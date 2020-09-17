@@ -7,18 +7,22 @@ output: html_document
 
 This document will outline the spatial analyses used in generating figures for my MSc. This code should be reproducible and should work into the future as long as the functions stay the same. First, load libraries and initialize folders.
 
-```{r}
+```{r Load packages and set directories}
 
-library(bcmaps)
-library(bcdata)
-library(sf)
-library(tidyverse)
-library(foreach)
-library(measurements)
-library(tabulizer)
+suppressMessages(suppressWarnings({
+  ls <- c("tidyverse", "bcmaps", "bcdata", "sf", "foreach", "measurements", "tabulizer")
+  new_packages <- ls[!(ls %in% installed.packages()[, "Package"])]
+  if(length(new_packages)) install.packages(new_packages)
+  sapply(ls, library, character.only = TRUE, quietly = TRUE)[0]  
+  rm(ls, new_packages)}))
 
-dir_out <- file.path("./01_Spatial_Data")
-dir.create(dir_out, showWarnings = FALSE)
+data_dir <- file.path("./01_Spatial_Data/data")
+ldb_maps_dir <- file.path("./01_Spatial_Data/layers/ldb")
+bc_maps_dir <- file.path("./01_Spatial_Data/layers/bc")
+results_dir <- file.path("./01_Spatial_Data/results")
+dir.create(ldb_maps_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(bc_maps_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(results_dir, showWarnings = FALSE)
 
 ```
 
@@ -36,8 +40,7 @@ ldb_aoi <- bcdata::bcdc_query_geodata("1130248f-f1a3-4956-8b2e-38d29d3e4af7", cr
 
 ldb_area <- conv_unit(units::drop_units(st_area(ldb_aoi)), "m2", "hectare")
 
-st_write(ldb_aoi, file.path(dir_out, "ldb.gpkg"), layer = "AOI",
-         delete_layer = TRUE, quiet = TRUE)
+st_write(ldb_aoi, file.path(ldb_maps_dir, "aoi.gpkg"), delete_layer = TRUE, quiet = TRUE)
 
 ```
 
@@ -56,14 +59,13 @@ ldb_bec <- bcmaps::bec(force = TRUE) %>%
   dplyr::mutate(bgc_area = conv_unit(units::drop_units(st_area(.)), "m2", "hectare")) %>% 
   st_cast("MULTIPOLYGON")
 
-st_write(ldb_bec, file.path(dir_out, "ldb.gpkg"), layer = "BEC",
-         delete_layer = TRUE, quiet = TRUE)
+st_write(ldb_bec, file.path(ldb_maps_dir, "bec.gpkg"), delete_layer = TRUE, quiet = TRUE)
 
 ```
 
 In this next section, we are going to use the IAPP (Invasive Alien Plant Program) database to find the spotted knapweed polygons in Lac Du Bois. 
 
-```{r invasive alien plant site}
+```{r LDB IAPP plant sites}
 
 # Download invasive plant boundaries from IAPP within the Lac Du Bois area
 ldb_iapp <- bcdata::bcdc_query_geodata("10ecf9ad-1555-4043-834a-f5d24a506d59", crs = 3005) %>% 
@@ -110,22 +112,20 @@ ldb_stats <- tribble(
   "ldb_area", ldb_area,
 )
 
-# Write outputs, save in single file for clarity
-st_write(ldb_iapp, file.path(dir_out, "ldb.gpkg"), layer = "IAPP_All",
+# Write outputs
+st_write(ldb_iapp, file.path(ldb_maps_dir, "iapp.gpkg"), delete_layer = TRUE, quiet = TRUE)
+st_write(ldb_sk, file.path(ldb_maps_dir, "iapp_sk.gpkg"), delete_layer = TRUE, quiet = TRUE)
+st_write(ldb_sk_by_subzone, file.path(ldb_maps_dir, "iapp_sk_by_subzone.gpkg"),
          delete_layer = TRUE, quiet = TRUE)
-st_write(ldb_sk, file.path(dir_out, "ldb.gpkg"), layer = "IAPP_SK",
+st_write(ldb_sk_by_zone, file.path(ldb_maps_dir, "iapp_sk_by_zone.gpkg"),
          delete_layer = TRUE, quiet = TRUE)
-st_write(ldb_sk_by_subzone, file.path(dir_out, "ldb.gpkg"), layer = "SK_by_subzone",
-         delete_layer = TRUE, quiet = TRUE)
-st_write(ldb_sk_by_zone, file.path(dir_out, "ldb.gpkg"), layer = "SK_by_zone",
-         delete_layer = TRUE, quiet = TRUE)
-write.csv(ldb_stats, file.path(dir_out, "ldb_stats.csv"), row.names = FALSE)
+write.csv(ldb_stats, file.path(results_dir, "ldb_stats.csv"), row.names = FALSE)
 
 ```
 
 Spotted knapwweed appears to be most dominant in BG zones in Lac Du Bois, followed by IDF zones. What about throughout BC? Is this consistent with the rest of the province or an artifact of a small sample area?
 
-```{r Provincial Analyses}
+```{r Provincial BEC and IAPP Analyses}
 # This section takes a while because it deals with province wide data.
 
 # Get full IAPP database
@@ -159,7 +159,7 @@ bc_sk_by_subzone <- sf::st_set_agr(bc_bgc_subzones, "constant") %>%
                 ratio = area / bgc_area * 100) %>% 
   dplyr::arrange(desc(area))
 
-# st_read(file.path(bc_out, "BC_SK_by_subzone.gpkg"), quiet = TRUE)
+# st_read(file.path(bc_maps_dir, "iapp_sk_by_subzone.gpkg"), quiet = TRUE)
 
 # Much faster to drop geometry column and do simple addition for BEC zone summary
 bc_sk_by_zone <- st_drop_geometry(bc_sk_by_subzone) %>% 
@@ -169,17 +169,12 @@ bc_sk_by_zone <- st_drop_geometry(bc_sk_by_subzone) %>%
   dplyr::arrange(desc(ratio))
 
 # Save as individual files for faster reading in later on if necessary
-bc_out <- file.path(dir_out, "bc")
-dir.create(bc_out, showWarnings = FALSE)
-st_write(bc_iapp, file.path(bc_out, "BC_IAPP_All.gpkg"), 
+st_write(bc_iapp, file.path(bc_maps_dir, "iapp.gpkg"), delete_layer = TRUE, quiet = TRUE)
+st_write(bc_sk, file.path(bc_maps_dir, "sk.gpkg"), delete_layer = TRUE, quiet = TRUE)
+st_write(bc_bgc_subzones, file.path(bc_maps_dir, "bec.gpkg"), delete_layer = TRUE, quiet = TRUE)
+st_write(bc_sk_by_subzone, file.path(bc_maps_dir, "iapp_sk_by_subzone.gpkg"), 
          delete_layer = TRUE, quiet = TRUE)
-st_write(bc_sk, file.path(bc_out, "BC_IAPP_SK.gpkg"), 
-         delete_layer = TRUE, quiet = TRUE)
-st_write(bc_bgc_subzones, file.path(bc_out, "BC_BEC.gpkg"), 
-         delete_layer = TRUE, quiet = TRUE)
-st_write(bc_sk_by_subzone, file.path(bc_out, "BC_SK_by_subzone.gpkg"), 
-         delete_layer = TRUE, quiet = TRUE)
-write.csv(bc_sk_by_zone, file.path(bc_out, "BC_SK_by_zone.csv"), row.names = FALSE)
+write.csv(bc_sk_by_zone, file.path(results_dir, "BC_iapp_sk_by_zone.csv"), row.names = FALSE)
 
 ```
 
@@ -188,7 +183,7 @@ SK covers ~.056% of the province of BC. That's not overly concerning; however, i
 
 Each zone has very important values for forestry, First Nations, and conservation of endangered species. With that in mind, this process for finding invasive species trends throughout our province should be looked at more seriously. There are currently nearly 160,000 polygons for invasive plant records throughout BC, perhaps we should see where SK falls in terms of how invasive it is in comparison to other plant species. This will require a further investigation into the text of the "MAP_LABEL" column, below:
 
-```{r}
+```{r BC Invasive Plant Metrics}
 
 # Extract plant species column
 bc_invasive_plants <- st_drop_geometry(bc_iapp) %>% 
@@ -264,14 +259,15 @@ bc_stats <- tribble(
   "bc_invaded_percent", bc_total_invaded_perc, 
   "bc_invaded_SK_ha", bc_sk_invaded_area,
   "bc_invaded_SK_perc", bc_sk_invaded_perc, 
-  "bc_invaded_SK_as_ratio_to_area_of_all_invasives", sk_of_all_invaded
-)
+  "bc_invaded_SK_as_ratio_to_area_of_all_invasives", sk_of_all_invaded)
 
-st_write(bc_invasive_plant_areas, file.path(bc_out, "BC_IAPP_by_plant.gpkg"), 
+# Write outputs
+st_write(bc_invasive_plant_areas, file.path(bc_maps_dir, "iapp_plant_bounds.gpkg"), 
          delete_layer = TRUE, quiet = TRUE)
-write.csv(bc_inv_plant_areas_no_geom, file.path(bc_out, "BC_IAPP_by_plant.csv"), row.names = FALSE)
-write.csv(bc_bgc_zone_data, file.path(bc_out, "BC_BEC_zone_data.csv"), row.names = FALSE)
-write.csv(bc_stats, file.path(bc_out, "BC_stats.csv"), row.names = FALSE)
+write.csv(bc_inv_plant_areas_no_geom, file.path(results_dir, "iapp_plant_bounds.csv"), 
+          row.names = FALSE)
+write.csv(bc_bgc_zone_data, file.path(results_dir, "BC_bec_zone_data.csv"), row.names = FALSE)
+write.csv(bc_stats, file.path(results_dir, "BC_stats.csv"), row.names = FALSE)
 
 ```
 
@@ -279,12 +275,16 @@ The analysis above shows that SK and DK are the most invasive plants in BC. Addi
 
 Next, I want to pull in the spatial data gathered from field work and see what I can capture from that:
 
-```{r}
+```{r MSC Study area analysis}
 
-unzip(file.path(dir_out, "field", "Matt.kmz"), exdir = file.path(dir_out, "field"), overwrite = TRUE)
-layers <- st_layers(file.path(dir_out, "field", "doc.kml"))$name
-field_data <- lapply(layers, function (x)
-  st_read(file.path(dir_out, "field", "doc.kml"), layer = x, quiet = TRUE))
+msc_map_dir <- file.path("./01_Spatial_Data/layers/study_area")
+dir.create(msc_map_dir, showWarnings = FALSE, recursive = TRUE)
+
+unzip(file.path(data_dir, "Matt.kmz"), exdir = msc_map_dir, overwrite = TRUE)
+layers <- st_layers(file.path(msc_map_dir, "doc.kml"))$name
+field_data <- sapply(layers, function(x)
+  st_read(file.path(msc_map_dir, "doc.kml"), layer = x, quiet = TRUE), 
+  simplify = FALSE, USE.NAMES = TRUE)
 area_of_invasion <- field_data[[which(sapply(field_data, function(x) 
   st_geometry_type(x, by_geometry = FALSE) == "POLYGON"))]] %>% 
   st_transform(3005) %>% 
@@ -304,8 +304,17 @@ aoi_within <- st_union(area_of_invasion) %>%
   st_intersection(ldb_sk)
 aoi_exp <- area_of_invasion %>% 
   dplyr::mutate(area = st_area(.)) %>% 
-  dplyr::mutate(within = units::drop_units(st_area(aoi_within) / area)) %>% 
-  dplyr::mutate(beyond = 1 - within)
+  dplyr::mutate(within_iapp_poly = units::drop_units(st_area(aoi_within) / area)) %>% 
+  dplyr::mutate(beyond_iapp_poly = 1 - within_iapp_poly) %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(-Description)
+
+# Write layers separately
+st_write(area_of_invasion, file.path(msc_map_dir, "aoi.gpkg"), delete_layer = TRUE,
+         quiet = TRUE)
+st_write(sample_site_exp, file.path(msc_map_dir, "sample_locations.gpkg"), 
+         delete_layer = TRUE, quiet = TRUE)
+write.csv(aoi_exp, file.path(results_dir, "study_area_info.csv"), row.names = FALSE)
 
 ```
 
@@ -368,6 +377,7 @@ ldb_rra_geom <- lapply(1:length(ldb_rra_geom), function(xx) {
     }
   }
 })
+
 # Apply new geometries to geometry columns
 ldb_rra <- st_set_geometry(ldb_rra, st_sfc(ldb_rra_geom, crs = 3005)) %>% 
   dplyr::filter(!st_is_empty(.))
@@ -407,8 +417,7 @@ area_perim <- data.frame(
 ldb_rra <- ldb_rra[area_perim$rows, ]
 
 # Write output
-st_write(ldb_rra, file.path(dir_out, "ldb.gpkg"), layer = "RRAs",
-         delete_layer = TRUE, quiet = TRUE)
+st_write(ldb_rra, file.path(ldb_maps_dir, "rras.gpkg"), delete_layer = TRUE, quiet = TRUE)
 
 ```
 
