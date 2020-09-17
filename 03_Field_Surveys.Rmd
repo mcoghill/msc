@@ -1,0 +1,569 @@
+---
+title: "03_Field_Surveys"
+author: "Matt"
+date: "9/15/2020"
+output: html_document
+---
+
+This document will go through the field surveys from each field plot and produce appropriate diversity indices and other interesting metrics.
+
+```{r}
+
+library(tidyverse)
+library(broom)
+library(vegan)
+library(car)
+library(ggpubr)
+library(foreach)
+library(tabulizer)
+library(sf)
+library(extrafont)
+if(length(fonts()) == 0) font_import(prompt = FALSE)
+loadfonts(device = "win")
+
+```
+
+Load data
+
+```{r}
+
+# Set directories
+data_dir <- file.path("./03_Field_Surveys/data")
+plot_dir <- file.path("./03_Field_Surveys/plots")
+results_dir <- file.path("./03_Field_Surveys/results")
+dir.create(plot_dir, showWarnings = FALSE)
+dir.create(results_dir, showWarnings = FALSE)
+
+# Read in plant cover data
+cov <- read.csv(file.path(data_dir, "plant_data.csv")) %>% 
+  separate(Site_ID, c("Site", "Rep"), remove = FALSE) %>% 
+  mutate(Rep = as.numeric(Rep))
+
+# In order to use the diversity function from the vegan package, the data need
+# to be pivoted where each row is a separate site and columns are plant species
+cov_pivot <- sapply(unique(cov$Site), function(x) {
+  dplyr::filter(cov, Site == x) %>% 
+    pivot_wider(Site_ID, names_from = Common.Name, values_from = Cover) %>% 
+    replace(is.na(.), 0)
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+# Perform diversity and richness calculations separately for each site
+shannon <- lapply(cov_pivot, function(x) 
+  data.frame(
+    Site_ID = x$Site_ID, 
+    shannon = diversity(x %>% dplyr::select(-Site_ID), index = "shannon")))
+simpson <- lapply(cov_pivot, function(x) 
+  data.frame(
+    Site_ID = x$Site_ID, 
+    simpson = diversity(x %>% dplyr::select(-Site_ID), index = "simpson")))
+richness <- lapply(cov_pivot, function(x) 
+  data.frame(
+    Site_ID = x$Site_ID, 
+    richness = apply(x %>% dplyr::select(-Site_ID), MARGIN = 1, function(y) sum(y != 0))))
+
+# Bring the calculations back together in a single table
+cov_summary <- lapply(list(shannon = shannon, simpson = simpson, richness = richness), function(x)
+  do.call(rbind, x) %>% 
+    pivot_longer(names(.)[2], names_to = "metric")) %>% 
+  do.call(rbind, .) %>% 
+  separate(Site_ID, c("Site", "Rep"), remove = FALSE) %>% 
+  dplyr::mutate(Rep = as.numeric(Rep), 
+                metric = factor(metric, levels = c("shannon", "simpson", "richness")), 
+                Site = as.factor(Site))
+
+# Want to perform t-test, so perform assumptions starting with if variables are 
+# equal (shapiro test), and then if the data are normal 
+cov_summary_stats <- sapply(as.character(unique(cov_summary$metric)), function(x) {
+  df <- dplyr::filter(cov_summary, metric == x) %>% 
+    dplyr::select(Site, value)
+  aov <- aov(value ~ Site, data = df)
+  resid <- residuals(aov)
+  shapiro <- shapiro.test(resid) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))
+  levene <- leveneTest(value ~ Site, data = df) %>% drop_na()
+  return(list(shapiro = shapiro, levene = levene))
+}, simplify = FALSE, USE.NAMES = TRUE) 
+
+div_normal_analysis <- lapply(cov_summary_stats, "[[", 1) %>% do.call(rbind, .)
+div_var_equal_analysis <- lapply(cov_summary_stats, "[[", 2) %>% do.call(rbind, .)
+
+# All tests come back showing that the data are normal and have equal variances
+# allowing us to proceed with a t-test
+
+cov_summary_analysis <- sapply(as.character(unique(cov_summary$metric)), function(x) {
+  df <- dplyr::filter(cov_summary, metric == x) %>% 
+    dplyr::select(Site, value)
+  t.test(value ~ Site, data = df, var.equal = TRUE) %>% 
+    tidy()
+}, simplify = FALSE, USE.NAMES = TRUE) %>% do.call(rbind, .) %>% 
+  rownames_to_column("metric") %>% 
+  dplyr::rename(Inv_mean = estimate1, 
+                Pri_mean = estimate2, 
+                df = parameter) %>% 
+  dplyr::mutate(stat_name = names(statistic)) %>% 
+  dplyr::select(-c(estimate, alternative))
+
+# Species richness is not significantly different between sites, but in the field
+# the invaded sites look much poorer than the pristine sites. Perhaps if richness
+# was split by invasive vs. native plant types, that could tease some interesting
+# results. I'll use the invasive plant list generated from the IAPP database
+
+# Copied code from 01_Spatial_Analysis
+bc_iapp_plant_table <- extract_tables(
+  "https://delivery.apps.gov.bc.ca/pub/iapp_imf/displayLabelLegend.do", 
+  output = "matrix") %>% 
+  lapply(function(x) { # Create dataframes from matrix, table headers are in first row
+    df <- as.data.frame(x)
+    colnames(df) <- df[1, ]
+    df <- df[-1, ]
+  }) %>% 
+  do.call(rbind, args = .) %>% 
+  dplyr::rename_with(make.names) %>% 
+  dplyr::arrange(Map.Label)
+rownames(bc_iapp_plant_table) <- NULL
+
+# Merge together to find which records are of invasive plant species
+cov_invasive <- rbind(
+  merge(bc_iapp_plant_table, cov, by.x = "Latin.Name", by.y = "Scientific.Name") %>% 
+    dplyr::select(Latin.Name, Site_ID) %>% 
+    dplyr::rename(Scientific.Name = Latin.Name),
+  merge(bc_iapp_plant_table, cov, by = "Common.Name") %>% 
+    dplyr::select(Scientific.Name, Site_ID)
+) %>% dplyr::mutate(Invasive = TRUE) %>% 
+  merge(cov, by = c("Scientific.Name", "Site_ID"), all = TRUE) %>% 
+  replace_na(list(Invasive = FALSE))
+
+# Extract names of all recorded invasive plants in my study site
+invasive_plants <- dplyr::filter(cov_invasive, Invasive == TRUE) %>% 
+  dplyr::pull(Common.Name) %>% unique()
+
+# Create separate pivot tables - one for invasive plants, and one for native 
+# plants, both of which have recorded cover values at invaded and pristine sites
+cov_invasive_pivot <- sapply(unique(cov_invasive$Site), function(x) {
+  dplyr::filter(cov_invasive, Site == x) %>% 
+    pivot_wider(Site_ID, names_from = Common.Name, values_from = Cover) %>% 
+    dplyr::select(any_of(invasive_plants), Site_ID) %>% 
+    replace(is.na(.), 0)
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+cov_native_pivot <- sapply(unique(cov_invasive$Site), function(x) {
+  dplyr::filter(cov_invasive, Site == x) %>% 
+    pivot_wider(Site_ID, names_from = Common.Name, values_from = Cover) %>% 
+    dplyr::select(-any_of(invasive_plants)) %>%
+    replace(is.na(.), 0)
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+# Calculate richness for each of those
+invasive_richness <- lapply(cov_invasive_pivot, function(x) 
+  data.frame(
+    Site_ID = x$Site_ID,
+    invasive_richness = apply(x %>% dplyr::select(-Site_ID), MARGIN = 1, function(y) 
+      sum(y != 0))))
+
+native_richness <- lapply(cov_native_pivot, function(x)
+  data.frame(
+    Site_ID = x$Site_ID,
+    native_richness = apply(x %>% dplyr::select(-Site_ID), MARGIN = 1, function(y) 
+      sum(y != 0))))
+
+# Combine the lists and create tables for invasive plant richness and native plant 
+# richness
+ls <- list(inv_richness = invasive_richness, nat_richness = native_richness)
+richness_ls <- lapply(ls, function(x)
+  do.call(rbind, x) %>% 
+    separate(Site_ID, c("Site", "Rep"), remove = FALSE) %>% 
+    pivot_longer(names(.)[4], names_to = "metric") %>% 
+    dplyr::mutate(Rep = as.numeric(Rep), 
+                  Site = as.factor(Site), 
+                  metric = as.factor(metric))) 
+
+# The new separated richness tables are ready for analysis (t-tests) - test assumptions
+inv_richness_assumptions <- lapply(richness_ls, function(x) {
+  aov <- aov(value ~ Site, data = x)
+  resid <- residuals(aov)
+  shapiro <- shapiro.test(resid) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))
+  levene <- leveneTest(value ~ Site, data = x) %>% drop_na()
+  return(list(shapiro = shapiro, levene = levene))
+})
+
+inv_richness_norm_analysis <- lapply(inv_richness_assumptions, "[[", 1) %>% do.call(rbind, .)
+inv_richness_var_eq_analysis <- lapply(inv_richness_assumptions, "[[", 2) %>% do.call(rbind, .)
+
+# Try log transformation of invasive plant richness data
+richness_ls_log <- list(
+  inv_richness = richness_ls$inv_richness %>% dplyr::mutate(value = log10(value + 1)), 
+  nat_richness = richness_ls$nat_richness)
+
+inv_log_richness_assumptions <- lapply(richness_ls_log, function(x) {
+  aov <- aov(value ~ Site, data = x)
+  resid <- residuals(aov)
+  shapiro <- shapiro.test(resid) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))
+  levene <- leveneTest(value ~ Site, data = x) %>% drop_na()
+  return(list(shapiro = shapiro, levene = levene))
+})
+
+# Still not normal, so a Mann Whitney test will be used on the untransformed data
+inv_richness_analysis <- wilcox.test(value ~ Site, data = richness_ls$inv_richness) %>% 
+  tidy() %>% 
+  dplyr::mutate(stat_name = names(statistic)) %>% 
+  dplyr::select(-alternative)
+nat_richness_analysis <- t.test(value ~ Site, data = richness_ls$nat_richness, var.equal = TRUE) %>% 
+  tidy() %>% 
+  dplyr::rename(Inv_mean = estimate1, 
+                Pri_mean = estimate2, 
+                df = parameter) %>% 
+  dplyr::mutate(stat_name = names(statistic)) %>% 
+  dplyr::select(-c(estimate, alternative))
+
+# Separating native species richness vs. invasive species richness at each site
+# yields significantly different species richnesses. This data should be added
+# to the cov_summary dataframe
+cov_summary2 <- dplyr::filter(cov_summary, metric != "richness") %>% 
+  bind_rows(do.call(rbind, richness_ls)) %>% droplevels()
+
+# Write some outputs
+write.csv(div_normal_analysis, 
+          file.path(results_dir, "01a_diversity_normal_assumption.csv"), row.names = TRUE)
+write.csv(div_var_equal_analysis, 
+          file.path(results_dir, "01b_diversity_var_equal_assumption.csv"), row.names = TRUE)
+write.csv(cov_summary_analysis, 
+          file.path(results_dir, "01c_diversity_ttests.csv"), row.names = FALSE)
+write.csv(inv_richness_norm_analysis, 
+          file.path(results_dir, "02a_inv_and_nat_richness_normal_assumption.csv"), 
+          row.names = TRUE)
+write.csv(inv_richness_var_eq_analysis, 
+          file.path(results_dir, "02b_inv_and_nat_richness_var_equal_assumption.csv"),
+          row.names = TRUE)
+write.csv(inv_richness_analysis, 
+          file.path(results_dir, "02c_invasive_species_richness_Mann_Whitney.csv"),
+          row.names = FALSE)
+write.csv(nat_richness_analysis, 
+          file.path(results_dir, "02d_native_species_richness_ttest.csv"), row.names = FALSE)
+
+```
+
+The data is mostly prepared. Now to focus on plotting it in a boxplot
+
+```{r}
+# This is code to generate a 3 paneled figure with 2 y-axes. It looked good but
+# wasn't my favorite.
+# p <- ggplot(cov_summary %>% 
+#               mutate(value = ifelse(metric == "richness", value / 7, value)), 
+#             aes(x = Site, y = value)) + 
+#   geom_boxplot(aes(fill = Site), color = "black") +
+#   theme_classic(base_size = 14) +
+#   theme(
+#     rect = element_rect(fill = "transparent"),
+#     text = element_text(family = "Times New Roman"),
+#     legend.position = "bottom",
+#     legend.background = element_rect(
+#       fill = "white",
+#       size = 1,
+#       linetype = "solid",
+#       colour = "black"),
+#     legend.title = element_text(face = "bold", size = 16),
+#     panel.grid.major = element_blank(),
+#     panel.grid.minor = element_blank(),
+#     axis.text = element_text(colour = "black"),
+#     axis.text.x = element_blank(),
+#     axis.ticks.x = element_blank(),
+#     axis.ticks.y = element_line(size = 1, linetype = "solid", colour = "black"),
+#     axis.title = element_text(face = "bold", size = 16),
+#     axis.title.x = element_blank(),
+#     axis.title.y = element_text(margin = margin(t = 0, 10, 0, 0)),
+#     axis.title.y.right = element_text(angle = 90),
+#     axis.line = element_blank(),
+#     plot.title = element_text(face = "bold", hjust = 0.5), 
+#     panel.border = element_rect(colour = "black", size = 2), 
+#     strip.background = element_blank(), 
+#     strip.text = element_text(face = "bold", size = 14)) +
+#   facet_wrap(
+#     ~ metric, ncol = 3, strip.position = "bottom",
+#     labeller = labeller(
+#       metric = c("Shannon (H)", "Simpson (D)", "Richness (S)") %>% 
+#         magrittr::set_names(c("shannon", "simpson", "richness")))) +
+#   scale_y_continuous(
+#     expand = c(0, 0),
+#     limits = c(0, round(max(
+#       cov_summary[cov_summary$metric != "richness", ]$value), digits = 1) + 0.3),
+#     
+#     # Features of the first axis
+#     name = "Shannon (H) and Simpson (D)\nDiversity Indices",
+#     
+#     # Add a second axis and specify its features
+#     sec.axis = sec_axis(~ . * 7, name = "Species Richness (S)")) +
+#   scale_fill_manual(
+#     values = c("gray99", "gray66"),
+#     breaks = c("Inv", "Pri"),
+#     labels = c("Invaded", "Pristine"), 
+#     name = "Site:") + 
+#   stat_compare_means(
+#     method = "t.test", method.args = list(var.equal = TRUE), label = "p.signif", 
+#     hide.ns = TRUE, label.x.npc = "center", size = 10, fontface = "bold", 
+#     label.y = round(max(
+#       cov_summary[cov_summary$metric != "richness", ]$value), digits = 1)) +
+#   ggsave(file.path(plot_dir, "diversity.png"), width = 12, height = 4, dpi = 300)
+
+plots <- lapply(c("diversity", "richness"), function(x) {
+  flt <- unlist(ifelse(
+    x == "diversity", list(c("shannon", "simpson")), 
+    list(c("native_richness", "invasive_richness"))))
+  p <- ggplot(cov_summary2 %>% dplyr::filter(metric %in% flt), aes(x = Site, y = value)) +
+    geom_boxplot(aes(fill = Site), color = "black") +
+    theme_classic(base_size = 14) +
+    ylab(ifelse(x == "diversity", "Diversity Index Score", "Species Richness Score")) +
+    theme(
+      rect = element_rect(fill = "transparent"),
+      text = element_text(family = "Times New Roman"),
+      legend.position = "bottom",
+      legend.background = element_rect(
+        fill = "white",
+        size = 1,
+        linetype = "solid",
+        colour = "black"),
+      legend.title = element_text(face = "bold", size = 16),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.text = element_text(colour = "black"),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.ticks.y = element_line(size = 1, linetype = "solid", colour = "black"),
+      axis.title = element_text(face = "bold", size = 16),
+      axis.title.x = element_blank(),
+      axis.title.y = element_text(margin = margin(t = 0, 20, 0, 0)),
+      axis.line = element_blank(),
+      panel.border = element_rect(colour = "black", size = 2),
+      strip.background = element_rect(colour = "black", size = 2),
+      strip.text = element_text(face = "bold", size = 14),
+      plot.title = element_text(face = "bold", hjust = 0.5)) +
+    scale_y_continuous(
+      expand = c(0, 0),
+      limits = c(0, ifelse(x == "diversity", 2.5, 15))) +
+    scale_fill_manual(
+      values = c("gray99", "gray66"),
+      breaks = c("Inv", "Pri"),
+      labels = c("Invaded", "Pristine"),
+      name = "Site:") +
+    facet_wrap(
+      ~ metric, ncol = 2, strip.position = "top",
+      labeller = labeller(
+        metric = unlist(ifelse(x == "diversity", list(c("Shannon (H)", "Simpson (D)")), 
+                        list(c("Native Richness (S)", "Invasive Richness (S)")))) %>%
+          magrittr::set_names(flt))) +
+    stat_compare_means(
+      method = "t.test", method.args = list(var.equal = TRUE), label = "p.signif",
+      hide.ns = TRUE, label.x.npc = "center", size = 10, fontface = "bold", 
+      label.y = ifelse(x == "diversity", 2.1, 12.6))
+})
+
+# Combine
+diversity_combined <- ggarrange(plotlist = plots, ncol = 1, common.legend = TRUE, legend = "bottom") +
+  ggsave(file.path(plot_dir, "diversity.png"), width = 6, height = 6, dpi = 300)
+
+```
+
+The above analysis only used plant data, however bare ground and litter cover values were also collected in the field. I'll do some analysis on those now too:
+
+```{r}
+
+litter <- read.csv(file.path(data_dir, "litter_bg_data.csv"), header = TRUE) %>% 
+  pivot_wider(Site_ID, names_from = Common.Name, values_from = Cover) %>% 
+  replace(is.na(.), 0) %>% 
+  separate(Site_ID, c("Site", "Rep"), remove = FALSE) %>% 
+  mutate(Rep = as.numeric(Rep))
+
+litter_assumptions <- sapply(c("Litter", "Bare Ground"), function(x) {
+  df <- dplyr::rename(litter, data = all_of(x))
+  aov <- aov(data ~ Site, data = df)
+  resid <- residuals(aov)
+  shapiro <- shapiro.test(resid) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))
+  levene <- leveneTest(data ~ Site, data = df) %>% drop_na()
+  return(list(shapiro = shapiro, levene = levene))
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+litter_normal_analysis <- lapply(litter_assumptions, "[[", 1) %>% do.call(rbind, .)
+litter_var_eq_analysis <- lapply(litter_assumptions, "[[", 2) %>% do.call(rbind, .)
+
+# Litter data passes checks, bare ground data does not. Transform bare ground
+# data and try again
+litter <- dplyr::mutate(litter, log_bg = log10(`Bare Ground` + 1))
+litter_log_assumptions <- sapply(c("Litter", "log_bg"), function(x) {
+  df <- dplyr::rename(litter, data = all_of(x))
+  aov <- aov(data ~ Site, data = df)
+  resid <- residuals(aov)
+  shapiro <- shapiro.test(resid) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))
+  levene <- leveneTest(data ~ Site, data = df) %>% drop_na()
+  return(list(shapiro = shapiro, levene = levene))
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+# Bare ground data still not normal, so use nonparametric Mann Whitney test for 
+# the untransformed bare ground data
+litter_analysis <- t.test(Litter ~ Site, data = litter, var.equal = TRUE) %>% 
+  tidy() %>% 
+  dplyr::rename(Inv_mean = estimate1, 
+                Pri_mean = estimate2, 
+                df = parameter) %>% 
+  dplyr::mutate(stat_name = names(statistic)) %>% 
+  dplyr::select(-c(estimate, alternative))
+bg_analysis <- wilcox.test(`Bare Ground` ~ Site, data = litter) %>% 
+  tidy() %>% 
+  dplyr::mutate(stat_name = names(statistic))
+
+# Invaded and pristine sites have significantly different litter and bare ground 
+# covers. I haven't built code to show these in a graph because I think it might
+# be a bit useless, but I can if it becomes not so useless.
+
+# Write outputs
+write.csv(litter_normal_analysis, 
+          file.path(results_dir, "03a_litter_bg_norm_assumption.csv"), row.names = TRUE)
+write.csv(litter_var_eq_analysis, 
+          file.path(results_dir, "03b_litter_bg_var_eq_assumption.csv"), row.names = TRUE)
+write.csv(litter_analysis, file.path(results_dir, "03c_litter_ttest.csv"), row.names = FALSE)
+write.csv(bg_analysis, file.path(results_dir, "03d_bg_Mann_Whitney.csv"), row.names = FALSE)
+
+
+```
+
+Next, there were ground temperature recordings taken for Jordann's project in 2017. There are two thermochrons that were within my invaded area, and then I will use data from two data loggers that were in pristine areas close to my area of invasion.
+
+```{r}
+
+temperature_dir <- file.path(data_dir, "Temperature Data 2017")
+
+aoi <- st_read("./01_Spatial_Data/field/doc.kml", layer = "Matt.kmz", quiet = TRUE) %>% 
+  st_transform(3005) %>% 
+  st_make_valid() %>% 
+  st_geometry()
+
+unzip(file.path(data_dir, "Temperature Data 2017", "LDB Knapweed Study Sites.kmz"), 
+      exdir = temperature_dir, overwrite = TRUE)
+
+temp_sites <- st_read(file.path(temperature_dir, "doc.kml"), quiet = TRUE) %>% 
+  st_transform(3005)
+
+# Sites 1, 2, 12, 17, and 18 all have no recorded SK (aka pristine sites)
+sites_within <- st_set_agr(temp_sites, "constant") %>% 
+  st_intersection(aoi) %>% 
+  dplyr::mutate(Type = "Invaded")
+sites_near <- data.frame(Name = temp_sites$Name, dist = as.numeric(st_distance(aoi, temp_sites))) %>% 
+  dplyr::arrange(dist) %>% 
+  dplyr::filter(Name %in% paste("Site", c(1, 2, 12, 17, 18))) %>% 
+  dplyr::slice(c(1, 2)) %>% 
+  merge(temp_sites, by = "Name", all.x = TRUE) %>% 
+  st_sf(sf_column_name = "geometry") %>% 
+  st_zm() %>% 
+  dplyr::mutate(Type = "Pristine")
+site_list <- bind_rows(sites_near, sites_within)
+
+# Now, read CSV files matching the selected sites
+temp_data <- sapply(unique(site_list$Type), function(x) {
+  df <- dplyr::filter(site_list, Type == x)
+  foreach(y = unique(df$Name), .combine = rbind) %do% {
+    read.csv(file.path(temperature_dir, paste0(tolower(y), ".csv")), skip = 7, header = TRUE) %>% 
+      dplyr::select(-X) %>% 
+      drop_na() %>% 
+      dplyr::mutate(Date = as.Date(Date...Time.1, format = "%m.%d.%Y"), 
+                    DateTime = as.POSIXct(strptime(paste(as.Date(Date...Time.1, format = "%m.%d.%Y"), 
+                                              Date...Time.2), format = "%Y-%m-%d %H:%M:%S")), 
+                    month = month.abb[as.numeric(strftime(Date, "%m"))], 
+                    day = as.numeric(strftime(Date, "%d"))) %>% 
+      dplyr::select(-c(Date...Time, Date...Time.1)) %>% 
+      dplyr::rename(time = Date...Time.2, temp = Temperature...C.)
+  } %>% group_by(DateTime, Date, month, day, time) %>% 
+    dplyr::summarise(temp = mean(temp), .groups = "drop") %>% 
+    dplyr::mutate(Type = x)
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+temp_data_df <- do.call(rbind, temp_data)
+
+# Test for normality
+temp_aov <- aov(temp ~ Type, data = temp_data_df)
+temp_resid <- residuals(temp_aov)
+temp_shapiro <- shapiro.test(temp_resid) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))
+temp_levene <- leveneTest(temp ~ Type, data = temp_data_df) %>% drop_na()
+
+# Data is not normal and it doesn't make a lot of sense to transform temp data, 
+# though perhaps a conversion to farenheit would help?? Dunno.
+temp_analysis <- wilcox.test(temp ~ Type, data = temp_data_df) %>% 
+  tidy() %>% dplyr::mutate(stat_name = names(statistic))
+
+# The data are indeed different across the entire range of when data was collected
+# Now, create figure
+p <- ggplot(temp_data_df, aes(DateTime, temp)) +
+  geom_line(aes(color = Type), size = 1, alpha = 0.33) +
+  geom_smooth(
+    aes(fill = Type, color = Type),
+    size = 1,
+    alpha = 0.5) +
+  scale_color_manual(values = c("red", "black"), name = "Survey Site") +
+  scale_fill_manual(values = c("red", "black"), name = "Survey Site") +
+  scale_y_continuous(
+    expand = c(0, 0),
+    limits = c(5, 40),
+    breaks = c(5, 10, 15, 20, 25, 30, 35, 40)) +
+  scale_x_datetime(
+    expand = c(0, 0),
+    limits = as.POSIXct(c(
+      "2017-06-12 00:00:00", "2017-09-03 00:00:00")),
+    breaks = as.POSIXct(c(
+        "2017-06-15 00:00:00",
+        "2017-07-01 00:00:00",
+        "2017-07-15 00:00:00",
+        "2017-08-01 00:00:00",
+        "2017-08-15 00:00:00",
+        "2017-09-01 00:00:00")),
+    date_labels = "%b. %d") +
+  xlab("Date") +
+  ylab("Temperature (\u00B0C)") +
+  theme_classic(base_size = 14) +
+  theme(
+    text = element_text(family = "Times New Roman"),
+    legend.position = "right",
+    legend.title = element_text(face = "bold", size = 16),
+    legend.background = element_rect(
+      fill = "white",
+      size = 1,
+      linetype = "solid",
+      color = "black"),
+    axis.title = element_text(face = "bold", size = 16),
+    axis.title.y = element_text(margin = margin(t = 0, 10, 0, 0)),
+    axis.text = element_text(color = "black"),
+    axis.line = element_line(size = 1)) +
+  ggsave(file.path(plot_dir, "ground_temps.png"), width = 6, height = 3, dpi = 300)
+
+# There may be something to those smoothed lines that the noise has a hard
+# time picking up
+smooth_data <- ggplot_build(p)$data[[2]] %>% 
+  dplyr::mutate(Type = as.factor(ifelse(fill == "red", "Invaded", "Pristine")))
+
+# Test of equal variances and normality
+temp_smooth_aov <- aov(y ~ Type, data = smooth_data)
+temp_smooth_resid <- residuals(temp_smooth_aov)
+temp_smooth_shapiro <- shapiro.test(temp_smooth_resid) %>% 
+  tidy() %>% dplyr::mutate(stat_name = names(statistic))
+temp_smooth_levene <- leveneTest(y ~ Type, data = smooth_data) %>% drop_na()
+
+# The smoothed data are not normal, proceed with Mann Whitney test
+temp_smooth_analysis <- wilcox.test(y ~ Type, data = smooth_data) %>% 
+  tidy() %>% dplyr::mutate(stat_name = names(statistic))
+
+# Again, these smoothed values show significant differences
+
+# Write outputs
+write.csv(temp_shapiro, file.path(results_dir, "04a_temperature_norm_assumption.csv"),
+          row.names = FALSE)
+write.csv(temp_levene, file.path(results_dir, "04b_temperature_eq_var_assumption.csv"),
+          row.names = FALSE)
+write.csv(temp_analysis, file.path(results_dir, "04c_temperature_Mann_Whitney.csv"),
+          row.names = FALSE)
+write.csv(temp_smooth_shapiro, 
+          file.path(results_dir, "05a_temperature_smoothed_norm_assumption.csv"),
+          row.names = FALSE)
+write.csv(temp_smooth_levene, 
+          file.path(results_dir, "05b_temperature_smoothed_eq_var_assumption.csv"),
+          row.names = FALSE)
+write.csv(temp_smooth_analysis, 
+          file.path(results_dir, "05c_temperature_smoothed_Mann_Whitney.csv"),
+          row.names = FALSE)
+
+```
+
