@@ -20,7 +20,6 @@ I'll start with biomass collected in the greenhouse. First, load some packages
 
 library(tidyverse)
 library(car)
-library(ggplot2) # Does this load with tidyverse?
 library(ggpubr)
 library(magick)
 library(agricolae)
@@ -36,6 +35,8 @@ Next, initialize folders and load the data
 ```{r}
 
 data_dir <- file.path("./02_Greenhouse/data")
+plot_dir <- file.path("./02_Greenhouse/plots")
+dir.create(plot_dir, showWarnings = FALSE)
 biomass <- read_csv(file.path(data_dir, "greenhouse_raw.csv"), col_types = NULL)
   dplyr::mutate(Soil_Type = factor(Soil_Type, levels = c("Invaded", "Pristine")),
                 Soil_Treatment = factor(Soil_Treatment, levels = c("Con", "AC", "Ash")), 
@@ -141,8 +142,8 @@ interactions <- sapply(unique(biomass_summary$Species), function(x) {
 }, simplify = FALSE, USE.NAMES = TRUE)
 
 #Now join those 2 graphs together
-interactions <- ggarrange(plotlist = interactions, common.legend = TRUE, legend = "bottom") +
-  ggsave(filename = file.path(data_dir, "interactions.png"), width = 6, height = 3, dpi = 300)
+final <- ggarrange(plotlist = interactions, common.legend = TRUE, legend = "bottom") +
+  ggsave(filename = file.path(plot_dir, "interactions.png"), width = 6, height = 3, dpi = 300)
 #Export image at 600px wide x 300px tall
 
 ```
@@ -227,7 +228,7 @@ biomass_plot <- sapply(unique(biomass_summary$Species), function(x) {
 }, simplify = FALSE, USE.NAMES = TRUE)
 
 biomass_plot <- ggarrange(plotlist = biomass_plot, common.legend = TRUE, legend = "bottom") +
-  ggsave(file.path(data_dir, "bmass.png"), width = 6, height = 3, dpi = 300)
+  ggsave(file.path(plot_dir, "bmass.png"), width = 6, height = 3, dpi = 300)
 
 # If images are to be included, run the following lines:
 final <- biomass_plot + 
@@ -239,7 +240,7 @@ final <- biomass_plot +
                     xmax = 0.74,
                     ymin = 0.6,
                     ymax = 0.85) + 
-  ggsave(file.path(data_dir, "bmass_with_images.png"), width = 6, height = 3, dpi = 300)
+  ggsave(file.path(plot_dir, "bmass_with_images.png"), width = 6, height = 3, dpi = 300)
 
 ```
 
@@ -260,6 +261,113 @@ surv <- read_csv(file.path(data_dir, "greenhouse_raw.csv"), col_types = NULL) %>
 surv_summary <- group_by(surv, Soil_Type, Soil_Treatment, Species) %>% 
   summarise(across(c(germ_rat, deaths, trial_surv, germ_surv), 
                    list(mean = mean, se = ~sd(.x) / sqrt(n()))), .groups = "drop")
+
+plots <- names(surv_summary)[endsWith(names(surv_summary), "mean")]
+
+aovs <- sapply(plots, function(x) {
+  df <- dplyr::rename(surv, data = all_of(gsub("_mean", "", x)))
+  iter <- sapply(unique(df$Species), function(x) {
+    aov <- aov(data ~ Soil_Type * Soil_Treatment, 
+               data = subset(df, Species == x))
+    resid <- residuals(aov)
+    shapiro <- shapiro.test(resid)$p.value
+    levene <- leveneTest(data ~ Soil_Type * Soil_Treatment,
+                         data = subset(df, Species == x))$`Pr(>F)`[1]
+    return(list(aov = aov, shapiro = shapiro, levene = levene))
+  }, simplify = FALSE, USE.NAMES = TRUE)
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+surv_log <- mutate(surv, across(starts_with(gsub("_mean", "", plots)), ~log10(.x + 1)))
+surv_log_summary <- group_by(surv_log, Soil_Type, Soil_Treatment, Species) %>% 
+  summarise(across(c(germ_rat, deaths, trial_surv, germ_surv), 
+                   list(mean = mean, se = ~sd(.x) / sqrt(n()))), .groups = "drop")
+
+aovs_log <- sapply(plots, function(x) {
+  df <- dplyr::rename(surv_log, data = all_of(gsub("_mean", "", x)))
+  iter <- sapply(unique(df$Species), function(x) {
+    aov <- aov(data ~ Soil_Type * Soil_Treatment, 
+               data = subset(df, Species == x))
+    resid <- residuals(aov)
+    shapiro <- shapiro.test(resid)$p.value
+    levene <- leveneTest(data ~ Soil_Type * Soil_Treatment,
+                         data = subset(df, Species == x))$`Pr(>F)`[1]
+    return(list(aov = aov, shapiro = shapiro, levene = levene))
+  }, simplify = FALSE, USE.NAMES = TRUE)
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+surv_plots <- sapply(plots, function(x) {
+  
+  df <- dplyr::select(surv, Soil_Type, Soil_Treatment, Species, all_of(gsub("_mean", "", x))) %>% 
+    dplyr::mutate(Soil_Treatment = factor(Soil_Treatment, levels = c("AC", "Ash", "Con"))) %>% 
+    unite(trt, c("Soil_Type", "Soil_Treatment"), remove = FALSE) %>% 
+    dplyr::rename(data = all_of(gsub("_mean", "", x)))
+  
+  df_summary <- dplyr::select(
+    surv_summary, 
+    Soil_Type, Soil_Treatment, Species, all_of(c(x, gsub("_mean", "_se", x)))) %>% 
+    dplyr::mutate(Soil_Treatment = factor(Soil_Treatment, levels = c("AC", "Ash", "Con"))) %>% 
+    unite(trt, c("Soil_Type", "Soil_Treatment"), remove = FALSE) %>% 
+    dplyr::rename(mean = all_of(x), 
+                  se = all_of(gsub("_mean", "_se", x)))
+  
+  iter <- sapply(unique(df$Species), function(y) {
+    df2 <- dplyr::filter(df, Species == y)
+    df_summary2 <- dplyr::filter(df_summary, Species == y)
+    
+    df_summary2 <- HSD.test(aov(data ~ trt, data = df2), trt = "trt", group = TRUE)$groups %>% 
+      rownames_to_column("trt") %>% 
+      dplyr::select(-data) %>% 
+      merge(df_summary2)
+    
+    p <- ggplot(df_summary2, aes(Soil_Type, mean, fill = Soil_Treatment)) + 
+      geom_bar(stat = "identity", position = "dodge", colour = "black", size = 1) +
+      geom_errorbar(aes(ymin = mean - se, ymax = mean + se),
+                    size = 1, width = 0.3, position = position_dodge(0.9)) +
+      ggtitle(ifelse(x == plots[1], ifelse(y == "RF", "Rough Fescue", "Spotted Knapweed"), "")) +
+      xlab("Soil Site")+
+      ylab(paste0(ifelse(
+        x == "germ_rat_mean", "Germination Rate\nafter 1 month", ifelse(
+          x == "deaths_mean", "Mean deaths\nper pot", ifelse(
+            x == "trial_surv_mean", "90-day Survival Rate", 
+            "Survival Rate of\nGerminated Individuals"))))) +
+      theme_classic(base_size = 16) +
+      theme(
+        text = element_text(family = "Times New Roman"),
+        legend.position = c(0.18, 0.88),
+        legend.background = element_rect(
+          fill = "white", size = 1,linetype = "solid", colour = "black"),
+        legend.title = element_text(face = "bold", size = 18),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text = element_text(colour = "black"),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_line(size = 1, linetype = "solid", colour = "black"),
+        axis.title = element_text(face = "bold", size = 16),
+        axis.title.y = element_text(margin = margin(t = 0, 10, 0, 0)),
+        axis.line = element_line(size = 1), 
+        plot.title = element_text(face = "bold", hjust = 0.5)) +
+      scale_fill_manual(
+        values = c("dimgray", "darkgray", "gainsboro"),
+        breaks = c("AC","Ash","Con"),
+        labels = c("Activated Carbon", "Ash", "Control"),
+        name = "Soil Amendment:") +
+      scale_y_continuous(
+        expand = c(0, 0), 
+        limits = c(0, ifelse(x == "deaths_mean", 5, 1.25))) +
+      scale_x_discrete(labels = c(Invaded = "Invaded", Pristine = "Pristine")) +
+      geom_text(aes(label = groups, y = mean + se), position = position_dodge(0.9),
+                vjust= -0.5, family = "serif", size = 5)
+    
+  }, simplify = FALSE, USE.NAMES = TRUE)
+  
+  # final <- ggarrange(plotlist = iter, common.legend = TRUE, legend = "none")
+  
+}, simplify = TRUE, USE.NAMES = TRUE)
+
+final <- ggarrange(plotlist = surv_plots, common.legend = TRUE, legend = "bottom", 
+                   ncol = 2, nrow = 4) +
+  ggsave(filename = file.path(plot_dir, "survival.png"), width = 8.5, height = 11, dpi = 300)
+  
 
 ```
 
@@ -360,7 +468,7 @@ analyzer_plots <- sapply(elements, function(x) {
       values = c("gray99", "gray66", "gray33"),
       breaks = c("AC", "Ash", "Con"),
       labels = c("Control", "Activated Carbon", "Ash"), 
-      name = "Soil Amendment") +
+      name = "Soil Amendment:") +
     scale_x_discrete(labels = c(INV = "Invaded", PRI = "Pristine")) +
     scale_y_continuous(
       expand = c(0, 0), 
@@ -373,7 +481,7 @@ analyzer_plots <- sapply(elements, function(x) {
 
 # Arrange final plot of carbon and nitrogen only
 final <- ggarrange(plotlist = analyzer_plots[2:1], common.legend = TRUE, legend = "bottom") +
-  ggsave(filename = file.path(data_dir, "CN_plot.png"), width = 6, height = 3, dpi = 300)
+  ggsave(filename = file.path(plot_dir, "CN_plot.png"), width = 6, height = 3, dpi = 300)
 
 ```
 
