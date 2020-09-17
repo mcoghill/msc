@@ -9,14 +9,15 @@ This document will serve as the data wrangling portion for the failed field expe
 
 ```{r}
 
-library(tidyverse)
-library(broom)
-library(car)
-library(extrafont)
-if(any(!fonts() %in% unlist(windowsFonts()))) {
-  font_import(prompt = FALSE)
-  loadfonts(device = "win")
-} 
+suppressMessages(suppressWarnings({
+  ls <- c("tidyverse", "broom", "extrafont")
+  new_packages <- ls[!(ls %in% installed.packages()[, "Package"])]
+  if(length(new_packages)) install.packages(new_packages)
+  sapply(ls, library, character.only = TRUE, quietly = TRUE)[0]
+  if(any(!fonts() %in% unlist(windowsFonts()))) {
+    font_import(prompt = FALSE)
+    loadfonts(device = "win")}
+  rm(ls, new_packages)}))
 
 ```
 

@@ -9,17 +9,16 @@ This document will go through the field surveys from each field plot and produce
 
 ```{r}
 
-library(tidyverse)
-library(broom)
-library(vegan)
-library(car)
-library(ggpubr)
-library(foreach)
-library(tabulizer)
-library(sf)
-library(extrafont)
-if(length(fonts()) == 0) font_import(prompt = FALSE)
-loadfonts(device = "win")
+suppressMessages(suppressWarnings({
+  ls <- c("tidyverse", "broom", "car", "ggpubr", "car", "foreach", "sf", 
+          "tabulizer", "extrafont")
+  new_packages <- ls[!(ls %in% installed.packages()[, "Package"])]
+  if(length(new_packages)) install.packages(new_packages)
+  sapply(ls, library, character.only = TRUE, quietly = TRUE)[0]
+  if(any(!fonts() %in% unlist(windowsFonts()))) {
+    font_import(prompt = FALSE)
+    loadfonts(device = "win")}
+  rm(ls, new_packages)}))
 
 ```
 
