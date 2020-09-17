@@ -1,0 +1,141 @@
+---
+title: "04_Field_Experiment_Appendix"
+author: "Matt"
+date: "9/16/2020"
+output: html_document
+---
+
+This document will serve as the data wrangling portion for the failed field experiment portion of my Masters thesis.
+
+```{r}
+
+library(tidyverse)
+library(broom)
+library(car)
+library(extrafont)
+if(any(!fonts() %in% unlist(windowsFonts()))) {
+  font_import(prompt = FALSE)
+  loadfonts(device = "win")
+} 
+
+```
+
+Set directories and load data
+
+```{r}
+
+data_dir <- file.path("./04_Field_Experiment_Appendix/data")
+plot_dir <- file.path("./04_Field_Experiment_Appendix/plots")
+results_dir <- file.path("./04_Field_Experiment_Appendix/results")
+dir.create(plot_dir, showWarnings = FALSE)
+dir.create(results_dir, showWarnings = FALSE)
+
+field <- read.csv(file.path(data_dir, "FieldExp.csv"))
+
+```
+
+This analysis will predominantly focus on the change in the height and number of leaves from the planting day to the harvest day. There may also be biomass readings introduced.
+
+```{r planting height and nleaves}
+
+# Ideally, there should be no difference in planting height
+# Equal variance assumption test:
+t1_height_levene <- leveneTest(Planting_Height ~ Treatment, data = field)
+# P > 0.05, so the data have equal variances.
+
+# Normality test
+t1_height_aov <- aov(Planting_Height ~ Treatment, data = field)
+t1_height_resid <- residuals(t1_height_aov)
+t1_height_shapiro <- shapiro.test(t1_height_resid)
+# The data indicates that normality was violated, so we can proceed with a Kruskal-Wallis test instead.
+
+t1_height_kruskal <- kruskal.test(Planting_Height ~ Treatment, data = field)
+
+# According to the data, there is no difference in planting height
+
+# These same steps are followed for the number of leaves:
+t1_nleaves_levene <- leveneTest(Planting_Leaves ~ Treatment, data = field) # pass
+t1_nleaves_aov <- aov(Planting_Leaves ~ Treatment, data = field)
+t1_nleaves_resid <- residuals(t1_nleaves_aov)
+t1_nleaves_shapiro <- shapiro.test(t1_nleaves_resid)
+t1_nleaves_kruskal <- kruskal.test(Planting_Leaves ~ Treatment, data = field)
+# Again, there is no indication that the number of leaves differs in the plugs at 
+# the time they were planted.
+
+```
+
+Moving on to the end of the experiment. I'm not sure whether keeping 0's in the dataframe is useful or not, so run both analyses to determine that. I will also try running anovas on each set to see if amending soils with any of the amendments had significant effects on any of the variables. After this, paired t-tests will need to be performed.
+
+```{r harvest data}
+
+vars <- c("Harvest_Height", "Harvest_Leaves", "Change_Height", "Change_Leaves", "Biomass")
+tests <- sapply(c("zero", "no_zero"), function(x) {
+  if(x == "no_zero") {
+    df <- field %>% mutate(across(everything(), ~na_if(., 0))) %>% drop_na()
+  } else df <- field
+  assumptions <- sapply(vars, function(y) {
+    df2 <- dplyr::select(df, Treatment, all_of(y)) %>% dplyr::rename(data = all_of(y))
+    aov <- aov(data ~ Treatment, data = df2)
+    levene <- leveneTest(data ~ Treatment, data = df2) %>% tidy() %>% drop_na()
+    resid <- residuals(aov)
+    shapiro <- shapiro.test(resid) %>% tidy()
+    return(list(shapiro = shapiro, levene = levene, pass = c(
+      ifelse(levene$p.value > 0.05, TRUE, FALSE),
+      ifelse(shapiro$p.value > 0.05, TRUE, FALSE)), data = df2
+    ))}, simplify = FALSE, USE.NAMES = TRUE)
+  tests <- lapply(assumptions, function(y) {
+    if(all(y$pass)) {
+      aov <- aov(data ~ Treatment, data = y$data)
+      anova <- anova(aov)
+      tukey <- TukeyHSD(aov)
+      return(list(anova = anova, tukey = tukey))
+    } else {
+      df2 <- dplyr::mutate(y$data, data = ifelse(rep(any(y$data$data < 0), nrow(y$data)), 
+                                              data ^ 2, log10(data + 1)))
+      aov <- aov(data ~ Treatment, data = df2)
+      levene <- leveneTest(data ~ Treatment, data = df2) %>% tidy() %>% drop_na()
+      resid <- residuals(aov)
+      shapiro <- shapiro.test(resid) %>% tidy()
+      if(levene$p.value > 0.05 && shapiro$p.value > 0.05) {
+        anova <- anova(aov)
+        tukey <- TukeyHSD(aov)
+        if(any(y$data$data < 0)) {
+          return(list(levene_sqr = levene, shapiro_sqr = shapiro, anova_sqr = anova, 
+                      tukey_sqr = tukey))
+        } else {
+          return(list(log_levene = levene, log_shapiro = shapiro, log_anova = anova, 
+                      log_tukey = tukey))
+        }
+      } else {
+        kruskal <- kruskal.test(data ~ Treatment, data = y$data)
+        if(any(y$data$data < 0)) {
+          return(list(levene_sqr = levene, shapiro_sqr = shapiro, kruskal_sqr = kruskal))
+        } else {
+          return(list(log_levene = levene, log_shapiro = shapiro, log_kruskal = kruskal))
+        }
+      }
+    }
+  })
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+# CLEVER DATA EXPORT GOES HERE :) You're a champ
+
+```
+
+I don't think I'll plot any of this, but we can understand from above that no amount of transforming the data would help make it normal and nonparametric Kruskal Wallace tests were required. 
+
+The next part will involve using the original dataset and performing paired t-tests from planting to harvesting. This will also be where I generate figures.
+
+```{r}
+
+field_nozero <- field %>% mutate(across(everything(), ~na_if(., 0))) %>% drop_na()
+field_summary <- dplyr::select(field, Treatment, Rep, Planting_Height, Planting_Leaves,
+                               Harvest_Height, Harvest_Leaves) %>% 
+  pivot_longer(c(Planting_Height, Harvest_Height), names_to = "Factor", values_to = "height")
+field_summary_nozero <- dplyr::select(field_nozero, Treatment, Rep, Planting_Height, 
+                                      Planting_Leaves, Harvest_Height, Harvest_Leaves) %>% 
+  pivot_longer(c(Planting_Height, Harvest_Height), names_to = "Factor", values_to = "height")
+
+```
+
+
