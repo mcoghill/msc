@@ -1,0 +1,4 @@
+No spotted knapweed: 1,2,12,17,18
+Low: 5,7,11,9,15,16
+Medium: 6,8,10,14,19
+High:3,4,13,20
