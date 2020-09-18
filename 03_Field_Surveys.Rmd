@@ -11,7 +11,7 @@ This document will go through the field surveys from each field plot and produce
 
 suppressMessages(suppressWarnings({
   ls <- c("tidyverse", "broom", "car", "ggpubr", "car", "foreach", "sf", 
-          "tabulizer", "extrafont")
+          "tabulizer", "extrafont", "vegan")
   new_packages <- ls[!(ls %in% installed.packages()[, "Package"])]
   if(length(new_packages)) install.packages(new_packages)
   sapply(ls, library, character.only = TRUE, quietly = TRUE)[0]
@@ -244,7 +244,8 @@ write.csv(nat_richness_analysis,
 The data is mostly prepared. Now to focus on plotting it in a boxplot
 
 ```{r}
-# This is code to generate a 3 paneled figure with 2 y-axes. It looked good but
+
+# This is code to generate a 3 paneled figure with 2 y-axes. It looked ok but
 # wasn't my favorite.
 # p <- ggplot(cov_summary %>% 
 #               mutate(value = ifelse(metric == "richness", value / 7, value)), 
@@ -432,19 +433,19 @@ Next, there were ground temperature recordings taken for Jordann's project in 20
 ```{r}
 
 temperature_dir <- file.path(data_dir, "Temperature Data 2017")
+layer_dir <- file.path("./03_Field_Surveys/layers")
+dir.create(layer_dir, showWarnings = FALSE)
 
 # Load the study area boundary
-aoi <- st_read("./01_Spatial_Data/field/doc.kml", layer = "Matt.kmz", quiet = TRUE) %>% 
-  st_transform(3005) %>% 
-  st_make_valid() %>% 
+aoi <- st_read("./01_Spatial_Data/layers/study_area/aoi.gpkg", quiet = TRUE) %>% 
   st_geometry()
 
 # Load the thermochron location points by unqipping the kmz and loading the 
 # subsequent kml
 unzip(file.path(data_dir, "Temperature Data 2017", "LDB Knapweed Study Sites.kmz"), 
-      exdir = temperature_dir, overwrite = TRUE)
+      exdir = tempdir(), overwrite = TRUE)
 
-temp_sites <- st_read(file.path(temperature_dir, "doc.kml"), quiet = TRUE) %>% 
+temp_sites <- st_read(file.path(tempdir(), "doc.kml"), quiet = TRUE) %>% 
   st_transform(3005)
 
 # Get the temperature stations within the study area
@@ -464,7 +465,9 @@ sites_near <- data.frame(Name = temp_sites$Name, dist = as.numeric(st_distance(a
   dplyr::mutate(Type = "Pristine")
 
 # Combine the filtered points - these are the weather stations that will be used
-site_list <- bind_rows(sites_near, sites_within)
+site_list <- bind_rows(sites_near, sites_within) %>% 
+  dplyr::select(-Description) %>% 
+  replace_na(list(dist = 0))
 
 # Now, read CSV files matching the selected sites
 temp_data <- sapply(unique(site_list$Type), function(x) {
@@ -493,8 +496,11 @@ temp_resid <- residuals(temp_aov)
 temp_shapiro <- shapiro.test(temp_resid) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))
 temp_levene <- leveneTest(temp ~ Type, data = temp_data_df) %>% drop_na()
 
-# Data is not normal and it doesn't make a lot of sense to transform temp data, 
-# though perhaps a conversion to farenheit would help?? Dunno.
+# Data is not normal and it doesn't make a lot of sense to transform temp data.
+# When the data is plotted, it is all over the place; however, the smoothed lines
+# appear to be more normalized and perhaps they are. I'll create the plot for the
+# temperature data and then extract the smooth line data to see if that data is 
+# normal enough for a proper t-test instead of the Mann Whitney test done below:
 temp_analysis <- wilcox.test(temp ~ Type, data = temp_data_df) %>% 
   tidy() %>% dplyr::mutate(stat_name = names(statistic))
 
@@ -561,6 +567,10 @@ temp_smooth_analysis <- wilcox.test(y ~ Type, data = smooth_data) %>%
 # Again, these smoothed values show significant differences
 
 # Write outputs
+st_write(temp_sites, file.path(layer_dir, "all_thermochron_locations.gpkg"), 
+         delete_layer = TRUE, quiet = TRUE)
+st_write(site_list, file.path(layer_dir, "thermochron_analysis_locations.gpkg"),
+         delete_layer = TRUE, quiet = TRUE)
 write.csv(temp_shapiro, file.path(results_dir, "04a_temperature_norm_assumption.csv"),
           row.names = FALSE)
 write.csv(temp_levene, file.path(results_dir, "04b_temperature_eq_var_assumption.csv"),

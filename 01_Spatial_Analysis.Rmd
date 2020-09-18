@@ -280,8 +280,8 @@ Next, I want to pull in the spatial data gathered from field work and see what I
 msc_map_dir <- file.path("./01_Spatial_Data/layers/study_area")
 dir.create(msc_map_dir, showWarnings = FALSE, recursive = TRUE)
 
-unzip(file.path(data_dir, "Matt.kmz"), exdir = msc_map_dir, overwrite = TRUE)
-layers <- st_layers(file.path(msc_map_dir, "doc.kml"))$name
+unzip(file.path(data_dir, "Matt.kmz"), exdir = tempdir(), overwrite = TRUE)
+layers <- st_layers(file.path(tempdir(), "doc.kml"))$name
 field_data <- sapply(layers, function(x)
   st_read(file.path(msc_map_dir, "doc.kml"), layer = x, quiet = TRUE), 
   simplify = FALSE, USE.NAMES = TRUE)
