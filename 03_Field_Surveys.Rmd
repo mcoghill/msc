@@ -7,7 +7,7 @@ output: html_document
 
 This document will go through the field surveys from each field plot and produce appropriate diversity indices and other interesting metrics.
 
-```{r}
+```{r Load packages}
 
 suppressMessages(suppressWarnings({
   ls <- c("tidyverse", "broom", "car", "ggpubr", "car", "foreach", "sf", 
@@ -24,7 +24,7 @@ suppressMessages(suppressWarnings({
 
 Load data
 
-```{r}
+```{r Set directories load plant cover data}
 
 # Set directories
 data_dir <- file.path("./03_Field_Surveys/data")
@@ -243,7 +243,7 @@ write.csv(nat_richness_analysis,
 
 The data is mostly prepared. Now to focus on plotting it in a boxplot
 
-```{r}
+```{r Plant diversity plot}
 
 # This is code to generate a 3 paneled figure with 2 y-axes. It looked ok but
 # wasn't my favorite.
@@ -364,7 +364,7 @@ diversity_combined <- ggarrange(plotlist = plots, ncol = 1, common.legend = TRUE
 
 The above analysis only used plant data, however bare ground and litter cover values were also collected in the field. I'll do some analysis on those now too:
 
-```{r}
+```{r Litter analysis}
 
 litter <- read.csv(file.path(data_dir, "litter_bg_data.csv"), header = TRUE) %>% 
   pivot_wider(Site_ID, names_from = Common.Name, values_from = Cover) %>% 
@@ -430,7 +430,7 @@ write.csv(bg_analysis, file.path(results_dir, "03d_bg_Mann_Whitney.csv"),
 
 Next, there were ground temperature recordings taken for Jordann's project in 2017. There are two thermochrons that were within my invaded area, and then I will use data from two data loggers that were in pristine areas close to my area of invasion.
 
-```{r}
+```{r Ground temperature analysis}
 
 temperature_dir <- file.path(data_dir, "Temperature Data 2017")
 layer_dir <- file.path("./03_Field_Surveys/layers")

@@ -9,7 +9,7 @@ The intention of this document is to perform scientific analysis of the greenhou
 
 I'll start with biomass collected in the greenhouse. First, load some packages
 
-```{r}
+```{r Load packages}
 
 suppressMessages(suppressWarnings({
   ls <- c("tidyverse", "broom", "car", "ggpubr", "magick", "agricolae", "extrafont")
@@ -25,7 +25,7 @@ suppressMessages(suppressWarnings({
 
 Next, initialize folders and load the data
 
-```{r}
+```{r Set directories and load biomass data}
 
 data_dir <- file.path("./02_Greenhouse/data")
 plot_dir <- file.path("./02_Greenhouse/plots")
@@ -276,7 +276,7 @@ final <- biomass_plot +
 
 I need to do some stuff with survival of the planted greenhouse plants as well:
 
-```{r}
+```{r Survival data load and stats}
 
 # Read in the survival data from the same spreadsheet
 surv <- read.csv(file.path(data_dir, "greenhouse_raw.csv"), header = TRUE) %>% 
@@ -516,7 +516,7 @@ final <- ggarrange(plotlist = surv_plots, common.legend = TRUE, legend = "bottom
 
 Shifting gears to the elemental analyzer data now:
 
-```{r}
+```{r Elemental analyzer data load stats and figure}
 
 analyzer <- read.csv(file.path(data_dir, "Analyzer.csv"))
 
