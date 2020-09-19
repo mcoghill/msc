@@ -7,10 +7,10 @@ output: html_document
 
 This document will serve as the data wrangling portion for the failed field experiment portion of my Masters thesis.
 
-```{r}
+```{r Load packages}
 
 suppressMessages(suppressWarnings({
-  ls <- c("tidyverse", "broom", "extrafont")
+  ls <- c("tidyverse", "car", "broom", "extrafont", "foreach", "ggpubr")
   new_packages <- ls[!(ls %in% installed.packages()[, "Package"])]
   if(length(new_packages)) install.packages(new_packages)
   sapply(ls, library, character.only = TRUE, quietly = TRUE)[0]
@@ -21,9 +21,9 @@ suppressMessages(suppressWarnings({
 
 ```
 
-Set directories and load data
 
-```{r}
+
+```{r Set directories and load data}
 
 data_dir <- file.path("./04_Field_Experiment_Appendix/data")
 plot_dir <- file.path("./04_Field_Experiment_Appendix/plots")
@@ -67,7 +67,7 @@ t1_nleaves_kruskal <- kruskal.test(Planting_Leaves ~ Treatment, data = field)
 
 Moving on to the end of the experiment. I'm not sure whether keeping 0's in the dataframe is useful or not, so run both analyses to determine that. I will also try running anovas on each set to see if amending soils with any of the amendments had significant effects on any of the variables. After this, paired t-tests will need to be performed.
 
-```{r harvest data}
+```{r anova on all variables}
 
 vars <- c("Harvest_Height", "Harvest_Leaves", "Change_Height", "Change_Leaves", "Biomass")
 tests <- sapply(c("zero", "no_zero"), function(x) {
@@ -87,9 +87,9 @@ tests <- sapply(c("zero", "no_zero"), function(x) {
   tests <- lapply(assumptions, function(y) {
     if(all(y$pass)) {
       aov <- aov(data ~ Treatment, data = y$data)
-      anova <- anova(aov)
-      tukey <- TukeyHSD(aov)
-      return(list(anova = anova, tukey = tukey))
+      anova <- anova(aov) %>% tidy()
+      tukey <- TukeyHSD(aov) %>% tidy()
+      return(list(levene = y$levene, shapiro = y$shapiro, anova = anova, tukey = tukey))
     } else {
       df2 <- dplyr::mutate(y$data, data = ifelse(rep(any(y$data$data < 0), nrow(y$data)), 
                                               data ^ 2, log10(data + 1)))
@@ -98,8 +98,8 @@ tests <- sapply(c("zero", "no_zero"), function(x) {
       resid <- residuals(aov)
       shapiro <- shapiro.test(resid) %>% tidy()
       if(levene$p.value > 0.05 && shapiro$p.value > 0.05) {
-        anova <- anova(aov)
-        tukey <- TukeyHSD(aov)
+        anova <- anova(aov) %>% tidy()
+        tukey <- TukeyHSD(aov) %>% tidy()
         if(any(y$data$data < 0)) {
           return(list(levene_sqr = levene, shapiro_sqr = shapiro, anova_sqr = anova, 
                       tukey_sqr = tukey))
@@ -108,7 +108,7 @@ tests <- sapply(c("zero", "no_zero"), function(x) {
                       log_tukey = tukey))
         }
       } else {
-        kruskal <- kruskal.test(data ~ Treatment, data = y$data)
+        kruskal <- kruskal.test(data ~ Treatment, data = y$data) %>% tidy()
         if(any(y$data$data < 0)) {
           return(list(levene_sqr = levene, shapiro_sqr = shapiro, kruskal_sqr = kruskal))
         } else {
@@ -121,21 +121,145 @@ tests <- sapply(c("zero", "no_zero"), function(x) {
 
 # CLEVER DATA EXPORT GOES HERE :) You're a champ
 
+tests2 <- foreach(x = names(tests)) %do% {
+  x_list <- tests[[x]]
+  foreach(i = names(x_list)) %do% {
+    i_list <- x_list[[i]]
+    foreach(j = names(i_list)) %do% {
+      j_df <- x_list[[i]][[j]] %>% 
+        dplyr::mutate(method = j, variable = i, dataset = x)
+    } %>% magrittr::set_names(names(i_list))
+  } %>% magrittr::set_names(names(x_list))
+} %>% magrittr::set_names(names(tests))
+
+tests3 <- foreach(i = names(tests2[[1]])) %do% {
+  a <- lapply(tests2, "[[", i)
+  foreach(j = 1:max(sapply(a, length))) %do% {
+    b <- try(lapply(a, "[[", j) %>% do.call(bind_rows, .), silent = TRUE)
+    if(class(b) == "try-error") {
+      b <- a[[2]][[j]]
+    } else b
+    b[nrow(b) + 1, ] <- NA
+    b
+  } %>% magrittr::set_names(c("levene", "shapiro", "anova", "tukey")[1:length(a[[2]])])
+} %>% magrittr::set_names(names(tests2[[1]]))
+
+foreach(i = names(tests3)) %do% {
+  file_out <- file.path(results_dir, paste0(i, "_analysis.csv"))
+  if(file.exists(file_out)) unlink(file_out)
+  foreach(j = 1:length(tests3[[i]])) %do% {
+    write.table(tests3[[i]][[j]], file.path(results_dir, paste0(i, "_analysis.csv")), 
+                append = TRUE, row.names = FALSE, sep = ",", na = "")
+  }
+}
+
 ```
 
 I don't think I'll plot any of this, but we can understand from above that no amount of transforming the data would help make it normal and nonparametric Kruskal Wallace tests were required. 
 
 The next part will involve using the original dataset and performing paired t-tests from planting to harvesting. This will also be where I generate figures.
 
-```{r}
+```{r Paired ttest analysis}
 
 field_nozero <- field %>% mutate(across(everything(), ~na_if(., 0))) %>% drop_na()
-field_summary <- dplyr::select(field, Treatment, Rep, Planting_Height, Planting_Leaves,
-                               Harvest_Height, Harvest_Leaves) %>% 
-  pivot_longer(c(Planting_Height, Harvest_Height), names_to = "Factor", values_to = "height")
-field_summary_nozero <- dplyr::select(field_nozero, Treatment, Rep, Planting_Height, 
-                                      Planting_Leaves, Harvest_Height, Harvest_Leaves) %>% 
-  pivot_longer(c(Planting_Height, Harvest_Height), names_to = "Factor", values_to = "height")
+leaves <- dplyr::select(field, Treatment, Rep, Planting_Leaves, Harvest_Leaves) %>% 
+  pivot_longer(c(Planting_Leaves, Harvest_Leaves)) %>% 
+  dplyr::mutate(name = factor(name, levels = c("Planting_Leaves", "Harvest_Leaves")))
+height <- dplyr::select(field, Treatment, Rep, Planting_Height, Harvest_Height) %>% 
+  pivot_longer(c(Planting_Height, Harvest_Height)) %>% 
+  dplyr::mutate(name = factor(name, levels = c("Planting_Height", "Harvest_Height")))
+
+leaves_nozero <- dplyr::select(field_nozero, Treatment, Rep, Planting_Leaves, Harvest_Leaves) %>% 
+  pivot_longer(c(Planting_Leaves, Harvest_Leaves)) %>% 
+  dplyr::mutate(name = factor(name, levels = c("Planting_Leaves", "Harvest_Leaves")))
+height_nozero <- dplyr::select(field_nozero, Treatment, Rep, Planting_Height, Harvest_Height) %>% 
+  pivot_longer(c(Planting_Height, Harvest_Height)) %>% 
+  dplyr::mutate(name = factor(name, levels = c("Planting_Height", "Harvest_Height")))
+
+ls <- list(leaves = leaves, height = height, 
+           leaves_nozero = leaves_nozero, height_nozero = height_nozero)
+
+paired_results <- lapply(ls, function(x) {
+  aov <- aov(value ~ name, data = x)
+  resid <- residuals(aov)
+  shapiro <- shapiro.test(resid) %>% tidy()
+  if(shapiro$p.value > 0.05) {
+    levene <- leveneTest(value ~ name, data = x) %>% drop_na()
+    var_eq <- if(levene$`Pr(>F)` > 0.05) TRUE else FALSE
+    ttest <- t.test(value ~ name, data = x, paired = TRUE, var.equal = var_eq) %>% tidy()
+    return(list(shapiro = shapiro, levene = levene, ttest = ttest))
+  } else {
+    ttest <- wilcox.test(value ~ name, data = x, paired = TRUE) %>% tidy()
+    return(list(shapiro = shapiro, ttest = ttest))
+  }
+})
+
+# All tests passed, only need to output shapiro and ttest results
+paired_shapiro <- lapply(paired_results, "[[", "shapiro") %>% do.call(rbind, .) %>% 
+  dplyr::mutate(variable = names(paired_results))
+paired_ttest <- lapply(paired_results, "[[", "ttest") %>% do.call(rbind, .) %>% 
+  dplyr::mutate(variable = names(paired_results))
+
+write.csv(paired_shapiro, file.path(results_dir, "paired_ttest_shapiro.csv"), row.names = FALSE)
+write.csv(paired_ttest, file.path(results_dir, "paired_ttest_analysis.csv"), row.names = FALSE)
+
+```
+
+Moving on to the plots
+
+```{r Paired ttest plots}
+
+plots <- lapply(ls, function(x) {
+  df <- pivot_wider(x, names_from = "name")
+  p <- ggpaired(df, cond1 = ifelse(any(grepl("Leaves", x$name)), 
+                                   "Planting_Leaves", "Planting_Height"), 
+                cond2 = ifelse(any(grepl("Leaves", x$name)), 
+                               "Harvest_Leaves", "Harvest_Height"), nrow = 1,
+                facet.by = "Treatment", fill = "condition", ggtheme = theme_classic(),
+                palette = c("white", "grey33"), width = 1, line.color = "grey66", 
+                line.size = 0.5, linetype = "solid", xlab = "Treatment", 
+                ylab = ifelse(any(grepl("Leaves", x$name)), "No. Leaves", "Leaf Height (cm)")) +
+    theme_classic(base_size = 14) +
+    theme(
+      rect = element_rect(fill = "transparent"),
+      text = element_text(family = "Times New Roman"),
+      legend.position = "bottom",
+      legend.background = element_rect(
+        fill = "white",
+        size = 1,
+        linetype = "solid",
+        colour = "black"),
+      legend.title = element_text(face = "bold", size = 16),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.text = element_text(colour = "black"),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.ticks.y = element_line(size = 1, linetype = "solid", colour = "black"),
+      axis.title = element_text(face = "bold", size = 16),
+      axis.title.x = element_blank(),
+      axis.title.y = element_text(margin = margin(t = 0, 20, 0, 0)),
+      axis.line = element_blank(),
+      panel.border = element_rect(colour = "black", size = 2),
+      strip.background = element_rect(colour = "black", size = 2),
+      strip.text = element_text(face = "bold", size = 14),
+      plot.title = element_text(face = "bold", hjust = 0.5)
+    ) + 
+    scale_y_continuous(
+      expand = c(0, 0), 
+      limits = c(0, ifelse(any(grepl("Leaves", x$name)), 75, 20)), 
+      breaks = unlist(ifelse(any(grepl("Leaves", x$name)), list(c(0, 25, 50, 75)), 
+                             list(c(0, 5, 10, 15, 20))))) + 
+    scale_fill_manual(breaks = c(unlist(
+      ifelse(any(grepl("Leaves", x$name)), list(c("Planting_Leaves", "Harvest_Leaves")),
+             list(c("Planting_Height", "Harvest_Height"))))),
+      labels = c("May 1, 2018", "July 30, 2018"),
+      name = "Sampling Date:", values = c("white", "gray33"))
+})
+
+n_leaves_and_height <- ggarrange(plotlist = plots[1:2], common.legend = TRUE, legend = "bottom",
+                                 nrow = 2) + 
+  ggsave(file.path(plot_dir, "leaf_data.png"), width = 9, height = 6, dpi = 300)
 
 ```
 
