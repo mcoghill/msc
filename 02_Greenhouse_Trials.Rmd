@@ -16,7 +16,7 @@ suppressMessages(suppressWarnings({
   new_packages <- ls[!(ls %in% installed.packages()[, "Package"])]
   if(length(new_packages)) install.packages(new_packages)
   sapply(ls, library, character.only = TRUE, quietly = TRUE)[0]
-  if(any(!fonts() %in% unlist(windowsFonts()))) {
+  if(any(!fonts() %in% unlist(windowsFonts())) || length(fonts()) == 0) {
     font_import(prompt = FALSE)
     loadfonts(device = "win")}
   rm(ls, new_packages)}))
