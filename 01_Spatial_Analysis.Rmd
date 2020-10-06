@@ -10,7 +10,8 @@ This document will outline the spatial analyses used in generating figures for m
 ```{r Load packages and set directories}
 
 suppressMessages(suppressWarnings({
-  ls <- c("tidyverse", "bcmaps", "bcdata", "sf", "foreach", "measurements", "tabulizer")
+  ls <- c("tidyverse", "bcmaps", "bcdata", "sf", "foreach", "measurements",
+          "tabulizer", "mapview", "leaflet")
   new_packages <- ls[!(ls %in% installed.packages()[, "Package"])]
   if(length(new_packages)) install.packages(new_packages)
   sapply(ls, library, character.only = TRUE, quietly = TRUE)[0]  
@@ -283,7 +284,7 @@ dir.create(msc_map_dir, showWarnings = FALSE, recursive = TRUE)
 unzip(file.path(data_dir, "Matt.kmz"), exdir = tempdir(), overwrite = TRUE)
 layers <- st_layers(file.path(tempdir(), "doc.kml"))$name
 field_data <- sapply(layers, function(x)
-  st_read(file.path(msc_map_dir, "doc.kml"), layer = x, quiet = TRUE), 
+  st_read(file.path(tempdir(), "doc.kml"), layer = x, quiet = TRUE), 
   simplify = FALSE, USE.NAMES = TRUE)
 area_of_invasion <- field_data[[which(sapply(field_data, function(x) 
   st_geometry_type(x, by_geometry = FALSE) == "POLYGON"))]] %>% 
@@ -318,6 +319,119 @@ write.csv(aoi_exp, file.path(results_dir, "study_area_info.csv"), row.names = FA
 
 ```
 
+I have all of the necessary shapefiles that I would need. Now, I'd like to create a visually appealing figure for use in my thesis.
+
+```{r Create figures}
+
+fig_dir <- file.path("./01_Spatial_data/figures")
+dir.create(fig_dir, showWarnings = FALSE)
+
+ldb_trans <- ldb_aoi %>% st_transform(4326)
+ldb_cent <- st_centroid(ldb_aoi) %>% st_transform(4326) %>% st_coordinates()
+l <- leaflet() %>% addProviderTiles("OpenTopoMap") %>% 
+  addPolygons(data = ldb_trans, color = "black", weight = 2, opacity = 1, 
+              fillOpacity = 0.5, fillColor = "green") %>% 
+  addPolygons(data = ldb_sk %>% st_transform(4326), color = "black", weight = 2, opacity = 1, 
+              fillOpacity = 0.5, fillColor = "purple") %>% 
+  addPolygons(data = sa_trans, color = "black", weight = 2, opacity = 1, 
+              fillOpacity = 0.5, fillColor = "red") %>% 
+  addScaleBar("topright", options = c(metric = TRUE, imperial = FALSE)) %>% 
+  addLegend(
+    position = "topleft", colors = c("green", "purple"), opacity = 0.7,
+    labels = c(htmltools::HTML("Lac Du Bois<br/>Grasslands<br/>Protected Area"), 
+               htmltools::HTML("Spotted Knapweed<br/>Invasion (IAPP, 2020)"))
+    )
+
+mapshot(l, file = file.path(fig_dir, "ldb.png"), 
+        vwidth = 350, vheight = 400,
+        remove_controls = c("zoomControl", "layersControl", "homeButton",
+                            "drawToolbar", "easyButton"))
+
+##### View of study area
+
+sa_trans <- st_geometry(area_of_invasion) %>% st_transform(4326)
+sa_pts <- st_transform(sample_sites, 4326) %>% 
+  tidyr::separate(Name, c("Site", "Rep"), remove = FALSE)
+sa_cent <- st_centroid(area_of_invasion) %>% st_transform(4326) %>% st_coordinates()
+
+# Get different colored points for inv vs. pri sites
+# https://rstudio.github.io/leaflet/markers.html
+
+pal <- colorFactor(c("darkmagenta", "darkgreen"), domain = c("Pri", "Inv"))
+
+addLegendCustom <- function(map, colors, labels, sizes, opacity = 0.5, ...) {
+  colorAdditions <- paste0(colors, "; border-radius: 50%; width:", sizes, "px; height:", sizes, "px")
+  labelAdditions <- paste0("<div style='display: inline-block;height: ", 
+                           sizes, "px;margin-top: 4px;line-height: ", sizes, "px;'>", 
+                           labels, "</div>")
+
+  return(addLegend(map, colors = colorAdditions, 
+                   labels = labelAdditions, opacity = opacity, ... = ...))
+}
+
+s_step <- leaflet() %>% addProviderTiles("OpenTopoMap") %>% 
+  addPolygons(data = ldb_trans, color = "black", weight = 2, opacity = 1, 
+              fillOpacity = 0.5, fillColor = "green") %>% 
+  addPolygons(data = ldb_sk %>% st_transform(4326), color = "black", weight = 2, opacity = 1, 
+              fillOpacity = 0.5, fillColor = "purple") %>% 
+  addPolygons(data = sa_trans, color = "black", weight = 2, opacity = 1, 
+              fillOpacity = 0.8, fillColor = "red") %>% 
+  setView(lng = st_coordinates(st_centroid(sa_trans))[ ,"X"], 
+          lat = st_coordinates(st_centroid(sa_trans))[ ,"Y"], zoom = 14) %>% 
+  addScaleBar("topright", options = c(metric = TRUE, imperial = FALSE))
+
+s <- leaflet() %>% addProviderTiles("OpenTopoMap") %>% 
+  addPolygons(data = ldb_trans, color = "black", weight = 2, opacity = 1, 
+              fillOpacity = 0.5, fillColor = "green") %>% 
+  addPolygons(data = ldb_sk %>% st_transform(4326), color = "black", weight = 2, opacity = 1, 
+              fillOpacity = 0.5, fillColor = "purple") %>% 
+  addPolygons(data = sa_trans, color = "black", weight = 2, opacity = 1, 
+              fillOpacity = 0.8, fillColor = "red") %>% 
+  setView(lng = st_coordinates(st_centroid(sa_trans))[ ,"X"], 
+          lat = st_coordinates(st_centroid(sa_trans))[ ,"Y"], zoom = 18) %>% 
+  addScaleBar("topright", options = c(metric = TRUE, imperial = FALSE)) %>% 
+  addLegend(
+    position = "topleft", colors = "red", opacity = 0.8, labels = "Study Area") %>% 
+  addLegendCustom(colors = c("darkmagenta", "darkgreen"), labels = c("Invaded", "Pristine"), 
+                  sizes = 10, opacity = 1, position = "topleft", title = "Site") %>% 
+  addCircleMarkers(data = sa_pts, color = ~pal(Site), stroke = FALSE, 
+                   fillOpacity = 1, radius = 5)
+
+# This doesn't work, creates a shiny.tag.list object that doesn't easily output
+# to an image.
+# s2 <- browsable(
+#    tagList(
+#       list(
+#          tags$head(
+#             tags$style(
+#                ".leaflet .legend {
+#                  line-height: 20px;
+#                  font-size: 20px;
+#                  font-weight: bold;
+#                  font-family: Times New Roman;
+#                  }",
+#               ".leaflet .legend i{
+#                 width: 20px;
+#                 height: 20px;
+#                  }"
+#             )
+#          ),
+#        s)))
+# 
+# tag <- plotTag(s2, alt = "", width = 350, height = 400)
+# capturePlot(tag, filename = file.path(fig_dir, "study_area_zoom.png"))
+
+mapshot(s_step, file = file.path(fig_dir, "study_area_zoom.png"), 
+        vwidth = 350, vheight = 400,
+        remove_controls = c("zoomControl", "layersControl", "homeButton",
+                            "drawToolbar", "easyButton"))
+
+mapshot(s, file = file.path(fig_dir, "study_area.png"), 
+        vwidth = 350, vheight = 400,
+        remove_controls = c("zoomControl", "layersControl", "homeButton",
+                            "drawToolbar", "easyButton"))
+
+```
 
 Separately, here is some code for finding all range reference areas within a study area (may also include smaller fencing units as well that are used in rangelands). It took a bit of wrangling but this works decently well, I think...
 
