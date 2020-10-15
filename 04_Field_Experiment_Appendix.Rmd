@@ -48,7 +48,8 @@ t1_height_levene <- leveneTest(Planting_Height ~ Treatment, data = field)
 t1_height_aov <- aov(Planting_Height ~ Treatment, data = field)
 t1_height_resid <- residuals(t1_height_aov)
 t1_height_shapiro <- shapiro.test(t1_height_resid)
-# The data indicates that normality was violated, so we can proceed with a Kruskal-Wallis test instead.
+# The data indicates that normality was violated, so we can proceed with a 
+# Kruskal-Wallis test instead.
 
 t1_height_kruskal <- kruskal.test(Planting_Height ~ Treatment, data = field)
 
@@ -69,7 +70,7 @@ Moving on to the end of the experiment. I'm not sure whether keeping 0's in the 
 
 ```{r anova on all variables}
 
-vars <- c("Harvest_Height", "Harvest_Leaves", "Change_Height", "Change_Leaves", "Biomass")
+vars <- names(field)[!names(field) %in% c("Treatment", "Rep")]
 tests <- sapply(c("zero", "no_zero"), function(x) {
   if(x == "no_zero") {
     df <- field %>% mutate(across(everything(), ~na_if(., 0))) %>% drop_na()
@@ -85,14 +86,15 @@ tests <- sapply(c("zero", "no_zero"), function(x) {
       ifelse(shapiro$p.value > 0.05, TRUE, FALSE)), data = df2
     ))}, simplify = FALSE, USE.NAMES = TRUE)
   tests <- lapply(assumptions, function(y) {
+    # If all assumptions pass
     if(all(y$pass)) {
       aov <- aov(data ~ Treatment, data = y$data)
       anova <- anova(aov) %>% tidy()
       tukey <- TukeyHSD(aov) %>% tidy()
       return(list(levene = y$levene, shapiro = y$shapiro, anova = anova, tukey = tukey))
     } else {
-      df2 <- dplyr::mutate(y$data, data = ifelse(rep(any(y$data$data < 0), nrow(y$data)), 
-                                              data ^ 2, log10(data + 1)))
+      # Try log transforming
+      df2 <- dplyr::mutate(y$data, data = log10(y$data$data + abs(min(y$data$data)) + 1))
       aov <- aov(data ~ Treatment, data = df2)
       levene <- leveneTest(data ~ Treatment, data = df2) %>% tidy() %>% drop_na()
       resid <- residuals(aov)
@@ -100,19 +102,37 @@ tests <- sapply(c("zero", "no_zero"), function(x) {
       if(levene$p.value > 0.05 && shapiro$p.value > 0.05) {
         anova <- anova(aov) %>% tidy()
         tukey <- TukeyHSD(aov) %>% tidy()
-        if(any(y$data$data < 0)) {
-          return(list(levene_sqr = levene, shapiro_sqr = shapiro, anova_sqr = anova, 
-                      tukey_sqr = tukey))
-        } else {
-          return(list(log_levene = levene, log_shapiro = shapiro, log_anova = anova, 
-                      log_tukey = tukey))
-        }
+        return(list(log_levene = levene, log_shapiro = shapiro, log_anova = anova, 
+                    log_tukey = tukey))
       } else {
-        kruskal <- kruskal.test(data ~ Treatment, data = y$data) %>% tidy()
-        if(any(y$data$data < 0)) {
-          return(list(levene_sqr = levene, shapiro_sqr = shapiro, kruskal_sqr = kruskal))
+        # Try square rooting it
+        df2 <- dplyr::mutate(y$data, data = sqrt(y$data$data + abs(min(y$data$data))))
+        aov <- aov(data ~ Treatment, data = df2)
+        levene <- leveneTest(data ~ Treatment, data = df2) %>% tidy() %>% drop_na()
+        resid <- residuals(aov)
+        shapiro <- shapiro.test(resid) %>% tidy()
+        if(levene$p.value > 0.05 && shapiro$p.value > 0.05) {
+          anova <- anova(aov) %>% tidy()
+          tukey <- TukeyHSD(aov) %>% tidy()
+          return(list(sqrt_levene = levene, sqrt_shapiro = shapiro, 
+                      sqrt_anova = anova, sqrt_tukey = tukey))
         } else {
-          return(list(log_levene = levene, log_shapiro = shapiro, log_kruskal = kruskal))
+          # Try squaring it
+          df2 <- dplyr::mutate(y$data, data = y$data$data ^ 2)
+          aov <- aov(data ~ Treatment, data = df2)
+          levene <- leveneTest(data ~ Treatment, data = df2) %>% tidy() %>% drop_na()
+          resid <- residuals(aov)
+          shapiro <- shapiro.test(resid) %>% tidy()
+          if(levene$p.value > 0.05 && shapiro$p.value > 0.05) {
+            anova <- anova(aov) %>% tidy()
+            tukey <- TukeyHSD(aov) %>% tidy()
+            return(list(levene_sqr = levene, shapiro_sqr = shapiro,
+                        anova_sqr = anova, tukey_sqr = tukey))
+          } else {
+            # If all fails, do a Kruskal test
+            kruskal <- kruskal.test(data ~ Treatment, data = y$data) %>% tidy()
+            return(list(levene = levene, shapiro = shapiro, kruskal = kruskal))
+          }
         }
       }
     }
@@ -189,19 +209,173 @@ paired_results <- lapply(ls, function(x) {
     ttest <- t.test(value ~ name, data = x, paired = TRUE, var.equal = var_eq) %>% tidy()
     return(list(shapiro = shapiro, levene = levene, ttest = ttest))
   } else {
-    ttest <- wilcox.test(value ~ name, data = x, paired = TRUE) %>% tidy()
-    return(list(shapiro = shapiro, ttest = ttest))
+    # Try log transform
+    y <- dplyr::mutate(x, value = log10(value + 1))
+    aov <- aov(value ~ name, data = y)
+    resid <- residuals(aov)
+    shapiro <- shapiro.test(resid) %>% tidy()
+    if(shapiro$p.value > 0.05) {
+      levene <- leveneTest(value ~ name, data = y) %>% drop_na()
+      var_eq <- if(levene$`Pr(>F)` > 0.05) TRUE else FALSE
+      ttest <- t.test(value ~ name, data = y, paired = TRUE, var.equal = var_eq) %>% tidy()
+      return(list(log_shapiro = shapiro, log_levene = levene, log_ttest = ttest))
+    } else {
+      # Try square root transform
+      y <- dplyr::mutate(x, value = sqrt(value))
+      aov <- aov(value ~ name, data = y)
+      resid <- residuals(aov)
+      shapiro <- shapiro.test(resid) %>% tidy()
+      if(shapiro$p.value > 0.05) {
+        levene <- leveneTest(value ~ name, data = y) %>% drop_na()
+        var_eq <- if(levene$`Pr(>F)` > 0.05) TRUE else FALSE
+        ttest <- t.test(value ~ name, data = y, paired = TRUE, var.equal = var_eq) %>% tidy()
+        return(list(sqrt_shapiro = shapiro, sqrt_levene = levene, sqrt_ttest = ttest))
+      } else {
+        # Try squaring
+        y <- dplyr::mutate(x, value = value ^ 2)
+        aov <- aov(value ~ name, data = y)
+        resid <- residuals(aov)
+        shapiro <- shapiro.test(resid) %>% tidy()
+        if(shapiro$p.value > 0.05) {
+          levene <- leveneTest(value ~ name, data = y) %>% drop_na()
+          var_eq <- if(levene$`Pr(>F)` > 0.05) TRUE else FALSE
+          ttest <- t.test(value ~ name, data = y, paired = TRUE, var.equal = var_eq) %>% tidy()
+          return(list(shapiro_sqr = shapiro, levene_sqr = levene, ttest_sqr = ttest))
+        } else {
+          ttest <- wilcox.test(value ~ name, data = x, paired = TRUE) %>% tidy()
+          return(list(shapiro = shapiro, wilcox = ttest))
+        }
+      }
+    }
   }
 })
 
 # All tests passed, only need to output shapiro and ttest results
-paired_shapiro <- lapply(paired_results, "[[", "shapiro") %>% do.call(rbind, .) %>% 
-  dplyr::mutate(variable = names(paired_results))
-paired_ttest <- lapply(paired_results, "[[", "ttest") %>% do.call(rbind, .) %>% 
-  dplyr::mutate(variable = names(paired_results))
+shap_ids <- grep("shapiro", unique(unlist(lapply(paired_results, names))), value = TRUE)
+leve_ids <- grep("levene", unique(unlist(lapply(paired_results, names))), value = TRUE)
+ttest_ids <- grep("ttest|wilcox", unique(unlist(lapply(paired_results, names))), value = TRUE)
+paired_shapiro <- lapply(shap_ids, function(x) 
+  lapply(paired_results, "[[", x) %>% do.call(rbind, .) %>% 
+    rownames_to_column("variable")) %>% do.call(bind_rows, .)
+paired_levene <- lapply(leve_ids, function(x) 
+  lapply(paired_results, "[[", x) %>% do.call(rbind, .) %>% 
+    rownames_to_column("variable")) %>% do.call(bind_rows, .)
+paired_ttest <- lapply(ttest_ids, function(x) 
+  lapply(paired_results, "[[", x) %>% do.call(rbind, .) %>% 
+    rownames_to_column("variable")) %>% do.call(bind_rows, .)
 
 write.csv(paired_shapiro, file.path(results_dir, "paired_ttest_shapiro.csv"), row.names = FALSE)
+write.csv(paired_levene, file.path(results_dir, "paired_ttest_levene.csv"), row.names = FALSE)
 write.csv(paired_ttest, file.path(results_dir, "paired_ttest_analysis.csv"), row.names = FALSE)
+
+```
+
+Paired tests are wrong - must use repeated measures anova to find differences between the two times and within the groups
+
+```{r repeated measures anova}
+
+rep_anova <- lapply(ls, function(x) {
+  # First, check outliers
+  outliers <- lapply(as.character(unique(x$name)), function(y) {
+    z <- dplyr::filter(x, name == y) %>% 
+      dplyr::pull(value)
+    q1 <- quantile(z, 0.25, na.rm = TRUE)
+    q3 <- quantile(z, 0.75, na.rm = TRUE)
+    iqr <- IQR(z, na.rm = TRUE)
+    upper_limit <- q3 + (3 * iqr)
+    lower_limit <- q1 - (3 * iqr)
+    outlier <- ifelse(z < lower_limit | z > upper_limit, TRUE, FALSE)
+      result <- expand.grid(name = y, id = which(outlier)) %>% 
+        cbind(value = x$value[which(outlier)])
+  }) %>% do.call(rbind, .)
+  
+  # If outliers are present, remove them
+  if(nrow(outliers) > 0) {
+    x <- x[c(outliers$id), c("Treatment", "Rep")] %>% 
+      anti_join(x = x, y = ., by = c("Treatment", "Rep"))
+  }
+  
+  # Next, test normality
+  norm_assum <- function(y, transform) {
+    aov <- aov(value ~ Treatment + Error(Rep), data = y)
+    resid <- residuals(aov$Within)
+    shapiro <- shapiro.test(resid) %>% tidy() %>% cbind(dat = transform)
+  }
+  
+  norm_test <- sapply(as.character(unique(x$name)), function(y) {
+    z <- dplyr::filter(x, name == y)
+    norm_assum(z, "normal")
+  }, simplify = FALSE, USE.NAMES = TRUE)
+  
+  if(any(sapply(norm_test, "[[", "p.value") <= 0.05)) {
+    norm_test2 <- sapply(as.character(unique(x$name)), function(y) {
+      z <- dplyr::filter(x, name == y) %>% 
+        dplyr::mutate(value = log10(value + 1))
+      norm_assum(z, "log")
+    }, simplify = FALSE, USE.NAMES = TRUE)
+    norm_test <- sapply(unique(names(c(norm_test, norm_test2))), function(y) 
+      do.call(rbind, lapply(list(norm_test, norm_test2), "[[", y)), simplify = FALSE, USE.NAMES = TRUE)
+  }
+  if(exists("norm_test2")) {
+    if(any(sapply(norm_test2, "[[", "p.value") <= 0.05)) {
+      norm_test2 <- sapply(as.character(unique(x$name)), function(y) {
+        z <- dplyr::filter(x, name == y) %>% 
+          dplyr::mutate(value = log10(value + 1))
+        norm_assum(z, "sqrt")
+      }, simplify = FALSE, USE.NAMES = TRUE)
+      norm_test <- sapply(unique(names(c(norm_test, norm_test2))), function(y) 
+        do.call(rbind, lapply(list(norm_test, norm_test2), "[[", y)), simplify = FALSE, USE.NAMES = TRUE)
+    }
+  }
+  if(exists("norm_test2")) {
+    if(any(sapply(norm_test2, "[[", "p.value") <= 0.05)) {
+      norm_test2 <- sapply(as.character(unique(x$name)), function(y) {
+        z <- dplyr::filter(x, name == y) %>% 
+          dplyr::mutate(value = value ^ 2)
+        norm_assum(z, "sqr")
+      }, simplify = FALSE, USE.NAMES = TRUE)
+      norm_test <- sapply(unique(names(c(norm_test, norm_test2))), function(y) 
+        do.call(rbind, lapply(list(norm_test, norm_test2), "[[", y)), simplify = FALSE, USE.NAMES = TRUE)
+    }
+  }
+  if(exists("norm_test2")) {
+    if(any(sapply(norm_test2, "[[", "p.value") <= 0.05)) {
+      y <- names(which.min(sapply(lapply(norm_test, "[[", "p.value"), min)))
+      met <- norm_test[[y]]$dat[which.max(norm_test[[y]]$p.value)]
+      norm_test <- lapply(norm_test, function(z) dplyr::filter(z, dat == met))
+      if(met == "log") {
+        x <- dplyr::mutate(x, value = log10(value + 1))
+      } else if(met == "sqrt") {
+        x <- dplyr::mutate(x, value = log10(value + 1))
+      } else if(met == "sqr") {
+        x <- dplyr::mutate(x, value = value ^ 2)
+      } else x <- x
+    } else {
+      met <- "sqr"
+      x <- dplyr::mutate(x, value = value ^ 2)
+    }
+  } else met <- "normal"
+  
+  y <- pivot_wider(x, names_from = name) %>% 
+    dplyr::select(x$name) %>% 
+    as.matrix()
+  
+  # Finally, a Sphericity test. Not so important if it fails
+  mauchly <- mauchly.test(lm(y ~ 1), X = ~ 1) %>% tidy()
+  
+  anova <- aov(value ~ Treatment * name + Error(Rep), data = x) %>% tidy()
+  return(list(anova = anova, result = met, shapiro = norm_test, mauchly = mauchly, 
+              data = x))
+})
+
+```
+
+Normality is violated in any scenario because of the 0's in the harvesting dataset. Because this experiment had poor results, I chose to use the repeated measures anova anyways. Of the data that is not 0 and that are not outliers, it ends up falling within the normal boundaries, which can be seen here:
+
+```{r}
+
+ggqqplot(rep_anova[[1]]$data, "value", facet.by = "name")
+ggqqplot(rep_anova[[2]]$data, "value", facet.by = "name")
 
 ```
 
@@ -210,13 +384,15 @@ Moving on to the plots
 ```{r Paired ttest plots}
 
 plots <- lapply(ls, function(x) {
-  df <- pivot_wider(x, names_from = "name")
+  df <- pivot_wider(x, names_from = "name") %>% 
+    dplyr::mutate(Treatment = gsub("ASH", "Ash", .$Treatment)) %>% 
+    dplyr::mutate(Treatment = gsub("CONTROL", "Control", .$Treatment))
   p <- ggpaired(df, cond1 = ifelse(any(grepl("Leaves", x$name)), 
                                    "Planting_Leaves", "Planting_Height"), 
                 cond2 = ifelse(any(grepl("Leaves", x$name)), 
                                "Harvest_Leaves", "Harvest_Height"), nrow = 1,
                 facet.by = "Treatment", fill = "condition", ggtheme = theme_classic(),
-                palette = c("white", "grey33"), width = 1, line.color = "grey66", 
+                palette = c("white", "grey33"), width = 0.85, line.color = "grey66", 
                 line.size = 0.5, linetype = "solid", xlab = "Treatment", 
                 ylab = ifelse(any(grepl("Leaves", x$name)), "No. Leaves", "Leaf Height (cm)")) +
     theme_classic(base_size = 14) +
@@ -229,20 +405,21 @@ plots <- lapply(ls, function(x) {
         size = 1,
         linetype = "solid",
         colour = "black"),
-      legend.title = element_text(face = "bold", size = 16),
+      legend.title = element_text(face = "bold", size = 14),
       panel.grid.major = element_blank(),
       panel.grid.minor = element_blank(),
+      panel.spacing = unit(-0.5, "lines"),
       axis.text = element_text(colour = "black"),
       axis.text.x = element_blank(),
       axis.ticks.x = element_blank(),
       axis.ticks.y = element_line(size = 1, linetype = "solid", colour = "black"),
-      axis.title = element_text(face = "bold", size = 16),
+      axis.title = element_text(face = "bold", size = 14),
       axis.title.x = element_blank(),
       axis.title.y = element_text(margin = margin(t = 0, 20, 0, 0)),
       axis.line = element_blank(),
       panel.border = element_rect(colour = "black", size = 2),
       strip.background = element_rect(colour = "black", size = 2),
-      strip.text = element_text(face = "bold", size = 14),
+      strip.text = element_text(face = "bold", size = 12),
       plot.title = element_text(face = "bold", hjust = 0.5)
     ) + 
     scale_y_continuous(
@@ -259,8 +436,69 @@ plots <- lapply(ls, function(x) {
 
 n_leaves_and_height <- ggarrange(plotlist = plots[1:2], common.legend = TRUE, legend = "bottom",
                                  nrow = 2) + 
-  ggsave(file.path(plot_dir, "leaf_data.png"), width = 9, height = 6, dpi = 300)
+  ggsave(file.path(plot_dir, "leaf_data.png"), width = 6, height = 4, dpi = 300)
 
 ```
 
+The final thing to work on is the biomass data. Ideally, a one way ANOVA will be all that is needed to determine differences in biomass (this is to be taken with a grain of salt, the data sucks):
+
+```{r Biomass data}
+
+bmass_aov <- aov(Biomass ~ Treatment, data = field)
+bmass_levene <- leveneTest(Biomass ~ Treatment, data = field) %>% tidy() %>% drop_na()
+bmass_resid <- residuals(bmass_aov)
+bmass_shapiro <- shapiro.test(bmass_resid) %>% tidy()
+
+# Variance ok, normality not so much. Transform?
+field <- dplyr::mutate(field, LogMass = log10(Biomass + 1))
+lmass_aov <- aov(LogMass ~ Treatment, data = field)
+lmass_levene <- leveneTest(LogMass ~ Treatment, data = field) %>% tidy() %>% drop_na()
+lmass_resid <- residuals(lmass_aov)
+lmass_shapiro <- shapiro.test(lmass_resid) %>% tidy()
+
+field <- dplyr::mutate(field, bmass2 = Biomass ^ 2)
+smass_aov <- aov(bmass2 ~ Treatment, data = field)
+smass_levene <- leveneTest(bmass2 ~ Treatment, data = field) %>% tidy() %>% drop_na()
+smass_resid <- residuals(smass_aov)
+smass_shapiro <- shapiro.test(smass_resid) %>% tidy()
+
+field <- dplyr::mutate(field, bmass_sq = sqrt(Biomass))
+sqmass_aov <- aov(bmass_sq ~ Treatment, data = field)
+sqmass_levene <- leveneTest(bmass_sq ~ Treatment, data = field) %>% tidy() %>% drop_na()
+sqmass_resid <- residuals(sqmass_aov)
+sqmass_shapiro <- shapiro.test(sqmass_resid) %>% tidy()
+
+# square root transformation worked, perform parametric one way anova
+anova_sqmass <- anova(sqmass_aov) %>% tidy()
+tukey_sqmass <- TukeyHSD(sqmass_aov) %>% tidy()
+
+# The data show no differences between any groups.
+write.csv(sqmass_shapiro, file.path(results_dir, "biomass_shapiro.csv"), row.names = FALSE)
+write.csv(sqmass_levene, file.path(results_dir, "biomass_levene.csv"), row.names = FALSE)
+write.csv(anova_sqmass, file.path(results_dir, "biomass_anova.csv"), row.names = FALSE)
+write.csv(tukey_sqmass, file.path(results_dir, "biomass_tukey.csv"), row.names = FALSE)
+
+```
+
+Identify some broad trends with the data. First, try to find trends using the whole dataset. After, filter the data to only include plants that survived and then run similar trend analyses.
+
+```{r}
+
+field_sum <- group_by(field, Treatment) %>% 
+  add_tally() %>% 
+  dplyr::summarise(across(everything(), mean), .groups = "drop")
+
+field_sum_nozero <- dplyr::filter(field, Harvest_Height > 0 | Harvest_Leaves > 0) %>% 
+  group_by(Treatment) %>% 
+  add_tally() %>% 
+  dplyr::summarise(across(everything(), c(mean, sd)), .groups = "drop") %>% 
+  dplyr::mutate(across(ends_with("_2"), ~ .x / sqrt(n_1)))
+
+names(field_sum_nozero) <- gsub("_2", "_se", names(field_sum_nozero))
+names(field_sum_nozero) <- gsub("_1", "_mean", names(field_sum_nozero))
+
+write.csv(field_sum_nozero, file.path(results_dir, "field_summary_nozero.csv"), row.names = FALSE)
+write.csv(field_sum, file.path(results_dir, "field_summary.csv"), row.names = FALSE)
+
+```
 
