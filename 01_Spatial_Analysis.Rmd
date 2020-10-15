@@ -10,11 +10,15 @@ This document will outline the spatial analyses used in generating figures for m
 ```{r Load packages and set directories}
 
 suppressMessages(suppressWarnings({
+  dt <- "devtools"[!("devtools" %in% installed.packages()[, "Package"])]
+  if(length(dt)) install.packages("devtools")
+  if(!"devtools" %in% rownames(installed.packages())) install.packages("devtools")
   ls <- c("tidyverse", "bcmaps", "bcdata", "sf", "foreach", "measurements",
           "tabulizer", "mapview", "leaflet")
   new_packages <- ls[!(ls %in% installed.packages()[, "Package"])]
   if(length(new_packages)) install.packages(new_packages)
-  sapply(ls, library, character.only = TRUE, quietly = TRUE)[0]  
+  sapply(ls, library, character.only = TRUE, quietly = TRUE)[0] 
+  if(!webshot::is_phantomjs_installed()) webshot::install_phantomjs()
   rm(ls, new_packages)}))
 
 data_dir <- file.path("./01_Spatial_Data/data")
@@ -326,6 +330,7 @@ I have all of the necessary shapefiles that I would need. Now, I'd like to creat
 fig_dir <- file.path("./01_Spatial_data/figures")
 dir.create(fig_dir, showWarnings = FALSE)
 
+sa_trans <- st_geometry(area_of_invasion) %>% st_transform(4326)
 ldb_trans <- ldb_aoi %>% st_transform(4326)
 ldb_cent <- st_centroid(ldb_aoi) %>% st_transform(4326) %>% st_coordinates()
 l <- leaflet() %>% addProviderTiles("OpenTopoMap") %>% 
@@ -349,7 +354,6 @@ mapshot(l, file = file.path(fig_dir, "ldb.png"),
 
 ##### View of study area
 
-sa_trans <- st_geometry(area_of_invasion) %>% st_transform(4326)
 sa_pts <- st_transform(sample_sites, 4326) %>% 
   tidyr::separate(Name, c("Site", "Rep"), remove = FALSE)
 sa_cent <- st_centroid(area_of_invasion) %>% st_transform(4326) %>% st_coordinates()
