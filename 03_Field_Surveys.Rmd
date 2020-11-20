@@ -211,10 +211,10 @@ inv_richness_var_eq_assum_raw <- lapply(inv_richness_assum_raw, "[[", "levene") 
 # but it works...
 nat_richness_assum <- lapply(richness_ls, mutate, sqrt_val = sqrt(value)) %>% 
   lapply(ttest_assum, dv = "sqrt_val", rm_outliers = FALSE) %>% lapply("[[", 1)
-nat_richness_norm_assum <- lapply(inv_richness_assum, "[[", "shapiro") %>% 
+nat_richness_norm_assum <- lapply(nat_richness_assum, "[[", "shapiro") %>% 
   do.call(rbind, .) %>% rownames_to_column("sp_richness") %>% 
   dplyr::mutate(sp_richness = gsub("\\..*", "", sp_richness))
-nat_richness_var_eq_assum <- lapply(inv_richness_assum, "[[", "levene") %>% 
+nat_richness_var_eq_assum <- lapply(nat_richness_assum, "[[", "levene") %>% 
   do.call(rbind, .) %>% rownames_to_column("sp_richness")
 
 # Native richness good, try log transforming for invasive richness
@@ -243,7 +243,7 @@ nat_richness_analysis <- ttest_custom(nat_richness_assum$nat_richness$data,
 inv_richness_analysis <- list(
   data = inv_richness_assum$inv_richness$data,
   ttest = inv_richness_assum$inv_richness$data %>% 
-    wilcox_test(value ~ Site) %>% 
+    rstatix::wilcox_test(value ~ Site) %>% 
     add_significance(),
   effect = inv_richness_assum$inv_richness$data %>% 
     wilcox_effsize(value ~ Site))
@@ -455,8 +455,8 @@ bg_log_assumptions <- sapply("bg_trans", function(x) {
 litter_analysis <- litter %>% t_test(Litter ~ Site, var.equal = TRUE) %>% add_significance()
 litter_effects <- litter %>% cohens_d(Litter ~ Site, var.equal = TRUE)
 
-bg_analysis <- litter %>% wilcox_test(`Bare Ground` ~ Site) %>% add_significance()
-bg_effects <- litter %>% wilcox_effsize(`Bare Ground` ~ Site)
+bg_analysis <- litter %>% rstatix::wilcox_test(`Bare Ground` ~ Site) %>% add_significance()
+bg_effects <- litter %>% rstatix::wilcox_effsize(`Bare Ground` ~ Site)
 
 lit_bg_analysis <- bind_rows(litter_analysis, bg_analysis)
 lit_bg_effects <- rbind(litter_effects, bg_effects)
@@ -549,7 +549,7 @@ temp_shapiro <- temp_data_df %>%
 # appear to be more normalized and perhaps they are. I'll create the plot for the
 # temperature data and then extract the smooth line data to see if that data is 
 # normal enough for a proper t-test instead of the Mann Whitney test done below:
-temp_analysis <- temp_data_df %>% wilcox_test(temp ~ Type) %>% 
+temp_analysis <- temp_data_df %>% rstatix::wilcox_test(temp ~ Type) %>% 
   add_significance() %>% mutate(metric = "temp_raw")
 temp_effect <- temp_data_df %>% wilcox_effsize(temp ~ Type) %>% mutate(metric = "temp_raw")
 
@@ -609,7 +609,7 @@ temp_smooth_shapiro <- smooth_data %>%
   shapiro_test(y) %>% mutate(metric = "temp_smooth")
 
 # The smoothed data are not normal, proceed with Mann Whitney test
-temp_smooth_analysis <- smooth_data %>% wilcox_test(y ~ Type) %>% 
+temp_smooth_analysis <- smooth_data %>% rstatix::wilcox_test(y ~ Type) %>% 
   add_significance() %>% mutate(metric = "temp_smooth")
 temp_smooth_effect <- smooth_data %>% wilcox_effsize(y ~ Type) %>% 
   mutate(metric = "temp_smooth")

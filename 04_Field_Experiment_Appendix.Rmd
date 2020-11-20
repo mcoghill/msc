@@ -338,6 +338,7 @@ write.csv(field_sum, file.path(results_dir, "field_summary.csv"), row.names = FA
 
 ## Extra stuff
 library(weathercan)
+library(sf)
 sample_sites <- st_read("./01_Spatial_Data/results/study_site_coordinates.csv",
                         crs = 3005, 
                         options = c("X_POSSIBLE_NAMES=X","Y_POSSIBLE_NAMES=Y"))

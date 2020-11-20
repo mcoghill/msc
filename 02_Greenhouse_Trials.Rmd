@@ -650,7 +650,7 @@ germ_rat_out <- sapply(names(germ_rat_analysis$RF)[
   !names(germ_rat_analysis$RF) %in% c("plot_type", "plot_trt")], function(x) {
   do.call(rbind, lapply(germ_rat_analysis, "[[", x))}, simplify = FALSE, USE.NAMES = TRUE) %>% 
   lapply(function(x) 
-    x %>% 
+    data.frame(x) %>% 
       rownames_to_column("species") %>% 
       dplyr::select(-any_of("Species")) %>% 
       dplyr::rename(Species = species) %>% 
