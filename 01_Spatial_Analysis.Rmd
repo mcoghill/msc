@@ -14,7 +14,7 @@ suppressMessages(suppressWarnings({
   if(length(dt)) install.packages("devtools")
   if(!"devtools" %in% rownames(installed.packages())) install.packages("devtools")
   ls <- c("tidyverse", "bcmaps", "bcdata", "sf", "foreach", "measurements",
-          "tabulizer", "mapview", "leaflet")
+          "mapview", "leaflet")
   new_packages <- ls[!(ls %in% installed.packages()[, "Package"])]
   if(length(new_packages)) install.packages(new_packages)
   sapply(ls, library, character.only = TRUE, quietly = TRUE)[0] 
@@ -138,7 +138,7 @@ bc_iapp <- bcdata::bcdc_query_geodata("10ecf9ad-1555-4043-834a-f5d24a506d59", cr
   collect()
 
 # Select only records containing "SK" in the MAP_LABEL column, and then calculate
-# the total area of all polygons. Need to union them because muliple polygons
+# the total area of all polygons. Need to union them because multiple polygons
 # overlap with one another, so if total area was calculated per polygon you get
 # an overinflated area rather than when they are merged together.
 bc_sk <- dplyr::filter(bc_iapp, grepl("SK", MAP_LABEL)) %>% 
@@ -164,7 +164,7 @@ bc_sk_by_subzone <- sf::st_set_agr(bc_bgc_subzones, "constant") %>%
                 ratio = area / bgc_area * 100) %>% 
   dplyr::arrange(desc(area))
 
-# st_read(file.path(bc_maps_dir, "iapp_sk_by_subzone.gpkg"), quiet = TRUE)
+# bc_sk_by_subzone <- st_read(file.path(bc_maps_dir, "iapp_sk_by_subzone.gpkg"), quiet = TRUE)
 
 # Much faster to drop geometry column and do simple addition for BEC zone summary
 bc_sk_by_zone <- st_drop_geometry(bc_sk_by_subzone) %>% 
@@ -195,18 +195,15 @@ bc_invasive_plants <- st_drop_geometry(bc_iapp) %>%
   dplyr::select(MAP_LABEL)
 
 # Get the official plant list from the IAPP, it has species names etc.
-bc_iapp_plant_table <- extract_tables(
-  "https://delivery.apps.gov.bc.ca/pub/iapp_imf/displayLabelLegend.do", 
-  output = "matrix") %>% 
-  lapply(function(x) { # Create dataframes from matrix, table headers are in first row
-    df <- as.data.frame(x)
-    colnames(df) <- df[1, ]
-    df <- df[-1, ]
-  }) %>% 
-  do.call(rbind, args = .) %>% 
-  dplyr::rename_with(make.names) %>% 
-  dplyr::arrange(Map.Label)
-rownames(bc_iapp_plant_table) <- NULL
+curl::curl_download(
+  "https://www2.gov.bc.ca/assets/gov/environment/plants-animals-and-ecosystems/invasive-species/iapp-resources/iapp_species_list_and_map_codes_feb2020.xlsx", 
+  destfile = file.path(data_dir, "iapp_species_list_and_map_codes.xlsx"))
+
+bc_iapp_plant_table <- readxl::read_xlsx(
+  file.path(data_dir, "iapp_species_list_and_map_codes.xlsx"), col_names = TRUE) %>% 
+  rename_with(make.names) %>% 
+  dplyr::arrange(Map.Symbol) %>% 
+  dplyr::rename(Map.Label = Map.Symbol)
 
 # Will use the separate function to get columns for different plants, but first
 # need to find out what the longest entry is to find how many columns there will be:
@@ -320,6 +317,8 @@ st_write(area_of_invasion, file.path(msc_map_dir, "aoi.gpkg"), delete_layer = TR
 st_write(sample_site_exp, file.path(msc_map_dir, "sample_locations.gpkg"), 
          delete_layer = TRUE, quiet = TRUE)
 write.csv(aoi_exp, file.path(results_dir, "study_area_info.csv"), row.names = FALSE)
+st_write(sample_sites, file.path(results_dir, "study_site_coordinates.csv"), 
+         layer_options = "GEOMETRY=AS_XY", delete_dsn = TRUE)
 
 ```
 
