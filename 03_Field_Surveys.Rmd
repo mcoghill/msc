@@ -11,7 +11,7 @@ This document will go through the field surveys from each field plot and produce
 
 suppressMessages(suppressWarnings({
   ls <- c("tidyverse", "broom", "car", "ggpubr", "car", "foreach", "sf", 
-          "tabulizer", "extrafont", "vegan")
+          "extrafont", "vegan", "rstatix", "coin")
   new_packages <- ls[!(ls %in% installed.packages()[, "Package"])]
   if(length(new_packages)) install.packages(new_packages)
   sapply(ls, library, character.only = TRUE, quietly = TRUE)[0]
@@ -72,34 +72,58 @@ cov_summary <- lapply(list(shannon = shannon, simpson = simpson, richness = rich
 
 # Want to perform t-test, so perform assumptions starting with if variables are 
 # equal (shapiro test), and then if the data are normal 
-cov_summary_stats <- sapply(as.character(unique(cov_summary$metric)), function(x) {
-  df <- dplyr::filter(cov_summary, metric == x) %>% 
-    dplyr::select(Site, value)
-  aov <- aov(value ~ Site, data = df)
-  resid <- residuals(aov)
-  shapiro <- shapiro.test(resid) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))
-  levene <- leveneTest(value ~ Site, data = df) %>% drop_na()
-  return(list(shapiro = shapiro, levene = levene))
-}, simplify = FALSE, USE.NAMES = TRUE) 
+ttest_assum <- function(x, dv, rm_outliers = TRUE) {
+  sapply(unique(as.character(x$metric)), function(i) {
+    df <- dplyr::filter(x, metric == i) %>% 
+      dplyr::rename(var = sym(dv)) %>% 
+      group_by(Site) %>% 
+      mutate(outlier = is_outlier(var), extreme = is_extreme(var)) %>% 
+      ungroup() %>% 
+      {if(rm_outliers) dplyr::filter(., !extreme) else .}
+    shapiro_model <- df %>% 
+      group_by(Site) %>% 
+      shapiro_test(var)
+    norm_plot_model <- ggqqplot(df, x = "var", facet.by = "Site")
+    levene <- df %>% levene_test(var ~ Site)
+    df <- dplyr::rename(df, !!dv := var)
+    return(list(data = df, shapiro = shapiro_model, 
+                norm_plot = norm_plot_model, levene = levene))
+  }, simplify = FALSE, USE.NAMES = TRUE)
+}
 
-div_normal_analysis <- lapply(cov_summary_stats, "[[", 1) %>% do.call(rbind, .)
-div_var_equal_analysis <- lapply(cov_summary_stats, "[[", 2) %>% do.call(rbind, .)
+cov_assum <- ttest_assum(cov_summary, dv = "value", rm_outliers = FALSE)
+cov_norm_assum <- lapply(cov_assum, "[[", "shapiro") %>% do.call(rbind, .) %>% 
+  rownames_to_column("metric") %>% 
+  dplyr::mutate(metric = gsub("\\..*", "", metric))
+cov_var_eq_assum <- lapply(cov_assum, "[[", "levene") %>% do.call(rbind, .) %>% 
+  rownames_to_column("metric")
 
 # All tests come back showing that the data are normal and have equal variances
 # allowing us to proceed with a t-test
+ttest_custom <- function(x, dv, var.equal = TRUE) {
+  sapply(unique(as.character(x$metric)), function(i) {
+    df <- dplyr::filter(x, metric == i) %>% 
+      dplyr::rename(var = sym(dv))
+    ttest <- df %>% t_test(var ~ Site, var.equal = var.equal) %>% 
+      add_significance()
+    ttest_plot <- ttest %>% add_xy_position(x = "Site")
+    effect <- df %>% cohens_d(var ~ Site, var.equal = var.equal)
+    plot <- ggboxplot(
+      df, x = "Site", y = "var", ylab = dv, xlab = "Site", add = "jitter") +
+      stat_pvalue_manual(ttest_plot, tip.length = 0) + 
+      labs(subtitle = get_test_label(ttest_plot, detailed = TRUE))
+    df <- dplyr::rename(df, !!dv := var)
+    return(list(data = df, ttest = ttest, effect = effect, plot = plot))
+  }, simplify = FALSE, USE.NAMES = TRUE)
+}
 
-cov_summary_analysis <- sapply(as.character(unique(cov_summary$metric)), function(x) {
-  df <- dplyr::filter(cov_summary, metric == x) %>% 
-    dplyr::select(Site, value)
-  t.test(value ~ Site, data = df, var.equal = TRUE) %>% 
-    tidy()
-}, simplify = FALSE, USE.NAMES = TRUE) %>% do.call(rbind, .) %>% 
-  rownames_to_column("metric") %>% 
-  dplyr::rename(Inv_mean = estimate1, 
-                Pri_mean = estimate2, 
-                df = parameter) %>% 
-  dplyr::mutate(stat_name = names(statistic)) %>% 
-  dplyr::select(-c(estimate, alternative))
+cov_analysis <- lapply(cov_assum, "[[", "data") %>% do.call(rbind, .) %>% 
+  ttest_custom(dv = "value", var.equal = TRUE)
+
+cov_ttest <- lapply(cov_analysis, "[[", "ttest") %>% do.call(rbind, .) %>% 
+  rownames_to_column("metric")
+cov_effect <- lapply(cov_analysis, "[[", "effect") %>% do.call(rbind, .) %>% 
+  rownames_to_column("metric")
 
 # Species richness is not significantly different between sites, but in the field
 # the invaded sites look much poorer than the pristine sites. Perhaps if richness
@@ -107,18 +131,16 @@ cov_summary_analysis <- sapply(as.character(unique(cov_summary$metric)), functio
 # results. I'll use the invasive plant list generated from the IAPP database
 
 # Copied code from 01_Spatial_Analysis
-bc_iapp_plant_table <- extract_tables(
-  "https://delivery.apps.gov.bc.ca/pub/iapp_imf/displayLabelLegend.do", 
-  output = "matrix") %>% 
-  lapply(function(x) { # Create dataframes from matrix, table headers are in first row
-    df <- as.data.frame(x)
-    colnames(df) <- df[1, ]
-    df <- df[-1, ]
-  }) %>% 
-  do.call(rbind, args = .) %>% 
-  dplyr::rename_with(make.names) %>% 
-  dplyr::arrange(Map.Label)
-rownames(bc_iapp_plant_table) <- NULL
+
+
+curl::curl_download(
+  "https://www2.gov.bc.ca/assets/gov/environment/plants-animals-and-ecosystems/invasive-species/iapp-resources/iapp_species_list_and_map_codes_feb2020.xlsx", 
+  destfile = file.path(data_dir, "iapp_species_list_and_map_codes.xlsx"))
+
+bc_iapp_plant_table <- readxl::read_xlsx(
+  file.path(data_dir, "iapp_species_list_and_map_codes.xlsx"), col_names = TRUE) %>% 
+  rename_with(make.names) %>% 
+  dplyr::arrange(Map.Symbol)
 
 # Merge together to find which records are of invasive plant species
 cov_invasive <- rbind(
@@ -132,7 +154,7 @@ cov_invasive <- rbind(
   replace_na(list(Invasive = FALSE))
 
 # Extract names of all recorded invasive plants in my study site
-invasive_plants <- dplyr::filter(cov_invasive, Invasive == TRUE) %>% 
+invasive_plants <- dplyr::filter(cov_invasive, Invasive) %>% 
   dplyr::pull(Common.Name) %>% unique()
 
 # Create separate pivot tables - one for invasive plants, and one for native 
@@ -177,67 +199,100 @@ richness_ls <- lapply(
                   metric = as.factor(metric))) 
 
 # The new separated richness tables are ready for analysis (t-tests) - test assumptions
-inv_richness_assumptions <- lapply(richness_ls, function(x) {
-  aov <- aov(value ~ Site, data = x)
-  resid <- residuals(aov)
-  shapiro <- shapiro.test(resid) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))
-  levene <- leveneTest(value ~ Site, data = x) %>% drop_na()
-  return(list(shapiro = shapiro, levene = levene))
-})
+inv_richness_assum_raw <- lapply(richness_ls, ttest_assum, dv = "value", rm_outliers = FALSE) %>% 
+  lapply("[[", 1)
+inv_richness_norm_assum_raw <- lapply(inv_richness_assum_raw, "[[", "shapiro") %>% 
+  do.call(rbind, .) %>% rownames_to_column("sp_richness") %>% 
+  dplyr::mutate(sp_richness = gsub("\\..*", "", sp_richness))
+inv_richness_var_eq_assum_raw <- lapply(inv_richness_assum_raw, "[[", "levene") %>% 
+  do.call(rbind, .) %>% rownames_to_column("sp_richness")
 
-inv_richness_norm_analysis <- lapply(inv_richness_assumptions, "[[", 1) %>% do.call(rbind, .)
-inv_richness_var_eq_analysis <- lapply(inv_richness_assumptions, "[[", 2) %>% do.call(rbind, .)
+# Data not normal, try square root transforming. NOTE: bad variable naming here,
+# but it works...
+nat_richness_assum <- lapply(richness_ls, mutate, sqrt_val = sqrt(value)) %>% 
+  lapply(ttest_assum, dv = "sqrt_val", rm_outliers = FALSE) %>% lapply("[[", 1)
+nat_richness_norm_assum <- lapply(inv_richness_assum, "[[", "shapiro") %>% 
+  do.call(rbind, .) %>% rownames_to_column("sp_richness") %>% 
+  dplyr::mutate(sp_richness = gsub("\\..*", "", sp_richness))
+nat_richness_var_eq_assum <- lapply(inv_richness_assum, "[[", "levene") %>% 
+  do.call(rbind, .) %>% rownames_to_column("sp_richness")
 
-# Try log transformation of invasive plant richness data
-richness_ls_log <- list(
-  inv_richness = richness_ls$inv_richness %>% dplyr::mutate(value = log10(value + 1)), 
-  nat_richness = richness_ls$nat_richness)
+# Native richness good, try log transforming for invasive richness
+inv_richness_assum <- lapply(richness_ls["inv_richness"], mutate, log_val = log10(value + 1)) %>% 
+  lapply(ttest_assum, dv = "log_val", rm_outliers = FALSE) %>% lapply("[[", 1)
+inv_richness_norm_assum <- lapply(inv_richness_assum, "[[", "shapiro") %>% 
+  do.call(rbind, .) %>% rownames_to_column("sp_richness") %>% 
+  dplyr::mutate(sp_richness = gsub("\\..*", "", sp_richness))
+inv_richness_var_eq_assum <- lapply(inv_richness_assum, "[[", "levene") %>% 
+  do.call(rbind, .) %>% rownames_to_column("sp_richness")
 
-inv_log_richness_assumptions <- lapply(richness_ls_log, function(x) {
-  aov <- aov(value ~ Site, data = x)
-  resid <- residuals(aov)
-  shapiro <- shapiro.test(resid) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))
-  levene <- leveneTest(value ~ Site, data = x) %>% drop_na()
-  return(list(shapiro = shapiro, levene = levene))
-})
+# No good, try inverse transformation
+inv_richness_assum <- lapply(richness_ls["inv_richness"], mutate, inv_val = 1 / (max(value + 1) - value)) %>% 
+  lapply(ttest_assum, dv = "inv_val", rm_outliers = FALSE) %>% lapply("[[", 1)
+inv_richness_norm_assum <- lapply(inv_richness_assum, "[[", "shapiro") %>% 
+  do.call(rbind, .) %>% rownames_to_column("sp_richness") %>% 
+  dplyr::mutate(sp_richness = gsub("\\..*", "", sp_richness))
+inv_richness_var_eq_assum <- lapply(inv_richness_assum, "[[", "levene") %>% 
+  do.call(rbind, .) %>% rownames_to_column("sp_richness")
 
-# Still not normal, so a Mann Whitney test will be used on the untransformed data
-inv_richness_analysis <- wilcox.test(value ~ Site, data = richness_ls$inv_richness) %>% 
-  tidy() %>% 
-  dplyr::mutate(stat_name = names(statistic)) %>% 
-  dplyr::select(-alternative)
-nat_richness_analysis <- t.test(value ~ Site, data = richness_ls$nat_richness, var.equal = TRUE) %>% 
-  tidy() %>% 
-  dplyr::rename(Inv_mean = estimate1, 
-                Pri_mean = estimate2, 
-                df = parameter) %>% 
-  dplyr::mutate(stat_name = names(statistic)) %>% 
-  dplyr::select(-c(estimate, alternative))
+# No transformation helped with invasive plant richness, use non-parametric version
+# Wilcoxon rank sum test (AKA Mann_Whitney)
+
+nat_richness_analysis <- ttest_custom(nat_richness_assum$nat_richness$data, 
+                                      dv = "sqrt_val", var.equal = TRUE)[[1]]
+inv_richness_analysis <- list(
+  data = inv_richness_assum$inv_richness$data,
+  ttest = inv_richness_assum$inv_richness$data %>% 
+    wilcox_test(value ~ Site) %>% 
+    add_significance(),
+  effect = inv_richness_assum$inv_richness$data %>% 
+    wilcox_effsize(value ~ Site))
+inv_richness_analysis$plot <- ggboxplot(
+  inv_richness_analysis$data, x = "Site", y = "value", ylab = "Richness", 
+  xlab = "Site", add = "jitter") + 
+  stat_pvalue_manual(inv_richness_analysis$ttest %>% add_xy_position(x = "Site"),
+                     tip.length = 0) +
+  labs(subtitle = get_test_label(inv_richness_analysis$ttest, detailed = TRUE))
 
 # Separating native species richness vs. invasive species richness at each site
 # yields significantly different species richnesses. This data should be added
 # to the cov_summary dataframe
-cov_summary2 <- dplyr::filter(cov_summary, metric != "richness") %>% 
-  bind_rows(do.call(rbind, richness_ls)) %>% droplevels()
+cov_summary2 <- bind_rows(cov_summary, do.call(rbind, richness_ls)) %>% droplevels()
+
+# Prepare data for output
+shapiro_out <- bind_rows(
+  nat_richness_assum$nat_richness$shapiro %>% dplyr::mutate(metric = "native_richness"), 
+  inv_richness_assum_raw$inv_richness$shapiro %>% dplyr::mutate(metric = "invasive_richness"),
+  cov_norm_assum)
+
+levene_out <- bind_rows(
+  nat_richness_assum$nat_richness$levene %>% dplyr::mutate(metric = "native_richness"), 
+  inv_richness_assum_raw$inv_richness$levene %>% dplyr::mutate(metric = "invasive_richness"),
+  cov_var_eq_assum)
+
+ttest_out <- bind_rows(
+  nat_richness_analysis$ttest %>% dplyr::mutate(metric = "native_richness"),
+  inv_richness_analysis$ttest %>% dplyr::mutate(metric = "invasive_richness"),
+  do.call(rbind, lapply(cov_analysis, "[[", "ttest")) %>% rownames_to_column("metric"))
+
+effects_out <- rbind(
+  data.frame(nat_richness_analysis$effect) %>% dplyr::mutate(metric = "native_richness"),
+  data.frame(inv_richness_analysis$effect) %>% dplyr::mutate(metric = "invasive_richness"),
+  data.frame(do.call(rbind, lapply(cov_analysis, "[[", "effect"))) %>%
+    rownames_to_column("metric"))
+
 
 # Write some outputs
-write.csv(div_normal_analysis, 
-          file.path(results_dir, "01a_diversity_normal_assumption.csv"), row.names = TRUE)
-write.csv(div_var_equal_analysis, 
-          file.path(results_dir, "01b_diversity_var_equal_assumption.csv"), row.names = TRUE)
-write.csv(cov_summary_analysis, 
-          file.path(results_dir, "01c_diversity_ttests.csv"), row.names = FALSE)
-write.csv(inv_richness_norm_analysis, 
-          file.path(results_dir, "02a_inv_and_nat_richness_normal_assumption.csv"), 
-          row.names = TRUE)
-write.csv(inv_richness_var_eq_analysis, 
-          file.path(results_dir, "02b_inv_and_nat_richness_var_equal_assumption.csv"),
-          row.names = TRUE)
-write.csv(inv_richness_analysis, 
-          file.path(results_dir, "02c_invasive_species_richness_Mann_Whitney.csv"),
-          row.names = FALSE)
-write.csv(nat_richness_analysis, 
-          file.path(results_dir, "02d_native_species_richness_ttest.csv"), row.names = FALSE)
+write.csv(cov_summary2, file.path(
+  results_dir, "01a_diversity_calculations.csv"), row.names = FALSE)
+write.csv(shapiro_out, file.path(
+  results_dir, "01b_diversity_normal_assumption.csv"), row.names = FALSE)
+write.csv(levene_out, file.path(
+  results_dir, "01c_diversity_var_equal_assumption.csv"), row.names = FALSE)
+write.csv(ttest_out, file.path(
+  results_dir, "01d_diversity_ttests.csv"), row.names = FALSE)
+write.csv(effects_out, file.path(
+  results_dir, "01e_diversity_effects.csv"), row.names = FALSE)
 
 ```
 
@@ -374,57 +429,51 @@ litter <- read.csv(file.path(data_dir, "litter_bg_data.csv"), header = TRUE) %>%
 
 litter_assumptions <- sapply(c("Litter", "Bare Ground"), function(x) {
   df <- dplyr::rename(litter, data = all_of(x))
-  aov <- aov(data ~ Site, data = df)
-  resid <- residuals(aov)
-  shapiro <- shapiro.test(resid) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))
-  levene <- leveneTest(data ~ Site, data = df) %>% drop_na()
+  shapiro <- df %>% group_by(Site) %>% shapiro_test(data)
+  levene <- df %>% levene_test(data ~ Site)
   return(list(shapiro = shapiro, levene = levene))
 }, simplify = FALSE, USE.NAMES = TRUE)
 
-litter_normal_analysis <- lapply(litter_assumptions, "[[", 1) %>% do.call(rbind, .)
-litter_var_eq_analysis <- lapply(litter_assumptions, "[[", 2) %>% do.call(rbind, .)
+litter_normal_analysis <- lapply(litter_assumptions, "[[", "shapiro") %>% 
+  do.call(rbind, .) %>% rownames_to_column("metric") %>%
+  dplyr::mutate(metric = gsub("\\..*", "", metric))
+  
+litter_var_eq_analysis <- lapply(litter_assumptions, "[[", "levene") %>% 
+  do.call(rbind, .) %>% rownames_to_column("metric") 
 
 # Litter data passes checks, bare ground data does not. Transform bare ground
 # data and try again
-litter <- dplyr::mutate(litter, log_bg = log10(`Bare Ground` + 1))
-litter_log_assumptions <- sapply(c("Litter", "log_bg"), function(x) {
-  df <- dplyr::rename(litter, data = all_of(x))
-  aov <- aov(data ~ Site, data = df)
-  resid <- residuals(aov)
-  shapiro <- shapiro.test(resid) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))
-  levene <- leveneTest(data ~ Site, data = df) %>% drop_na()
+bg <- dplyr::mutate(litter, bg_trans = sqrt(`Bare Ground`))
+bg_log_assumptions <- sapply("bg_trans", function(x) {
+  df <- dplyr::rename(bg, data = all_of(x))
+  shapiro <- df %>% group_by(Site) %>% shapiro_test(data)
+  levene <- df %>% levene_test(data ~ Site)
   return(list(shapiro = shapiro, levene = levene))
 }, simplify = FALSE, USE.NAMES = TRUE)
 
-# Bare ground data still not normal, so use nonparametric Mann Whitney test for 
-# the untransformed bare ground data
-litter_analysis <- t.test(Litter ~ Site, data = litter, var.equal = TRUE) %>% 
-  tidy() %>% 
-  dplyr::rename(Inv_mean = estimate1, 
-                Pri_mean = estimate2, 
-                df = parameter) %>% 
-  dplyr::mutate(stat_name = names(statistic)) %>% 
-  dplyr::select(-c(estimate, alternative))
-bg_analysis <- wilcox.test(`Bare Ground` ~ Site, data = litter) %>% 
-  tidy() %>% 
-  dplyr::mutate(stat_name = names(statistic))
+# Not coded but I tried all data transformations. Instead, use nonparametric test
+litter_analysis <- litter %>% t_test(Litter ~ Site, var.equal = TRUE) %>% add_significance()
+litter_effects <- litter %>% cohens_d(Litter ~ Site, var.equal = TRUE)
+
+bg_analysis <- litter %>% wilcox_test(`Bare Ground` ~ Site) %>% add_significance()
+bg_effects <- litter %>% wilcox_effsize(`Bare Ground` ~ Site)
+
+lit_bg_analysis <- bind_rows(litter_analysis, bg_analysis)
+lit_bg_effects <- rbind(litter_effects, bg_effects)
 
 # Invaded and pristine sites have significantly different litter and bare ground 
 # covers. I haven't built code to show these in a graph because I think it might
 # be a bit useless, but I can if it becomes not so useless.
 
 # Write outputs
-write.csv(litter_normal_analysis, 
-          file.path(results_dir, "03a_litter_bg_norm_assumption.csv"), 
-          row.names = TRUE)
-write.csv(litter_var_eq_analysis, 
-          file.path(results_dir, "03b_litter_bg_var_eq_assumption.csv"), 
-          row.names = TRUE)
-write.csv(litter_analysis, file.path(results_dir, "03c_litter_ttest.csv"), 
-          row.names = FALSE)
-write.csv(bg_analysis, file.path(results_dir, "03d_bg_Mann_Whitney.csv"), 
-          row.names = FALSE)
-
+write.csv(litter_normal_analysis, file.path(
+  results_dir, "02a_litter_bg_norm_assumption.csv"), row.names = TRUE)
+write.csv(litter_var_eq_analysis, file.path(
+  results_dir, "02b_litter_bg_var_eq_assumption.csv"), row.names = TRUE)
+write.csv(lit_bg_analysis, file.path(
+  results_dir, "02c_litter_bg_ttest.csv"), row.names = FALSE)
+write.csv(lit_bg_effects, file.path(
+  results_dir, "02d_litter_bg_effects.csv"), row.names = FALSE)
 
 ```
 
@@ -491,18 +540,18 @@ temp_data <- sapply(unique(site_list$Type), function(x) {
 temp_data_df <- do.call(rbind, temp_data)
 
 # Test for normality
-temp_aov <- aov(temp ~ Type, data = temp_data_df)
-temp_resid <- residuals(temp_aov)
-temp_shapiro <- shapiro.test(temp_resid) %>% tidy() %>% dplyr::mutate(stat_name = names(statistic))
-temp_levene <- leveneTest(temp ~ Type, data = temp_data_df) %>% drop_na()
+temp_shapiro <- temp_data_df %>% 
+  group_by(Type) %>% 
+  shapiro_test(temp) %>% mutate(metric = "temp_raw")
 
 # Data is not normal and it doesn't make a lot of sense to transform temp data.
 # When the data is plotted, it is all over the place; however, the smoothed lines
 # appear to be more normalized and perhaps they are. I'll create the plot for the
 # temperature data and then extract the smooth line data to see if that data is 
 # normal enough for a proper t-test instead of the Mann Whitney test done below:
-temp_analysis <- wilcox.test(temp ~ Type, data = temp_data_df) %>% 
-  tidy() %>% dplyr::mutate(stat_name = names(statistic))
+temp_analysis <- temp_data_df %>% wilcox_test(temp ~ Type) %>% 
+  add_significance() %>% mutate(metric = "temp_raw")
+temp_effect <- temp_data_df %>% wilcox_effsize(temp ~ Type) %>% mutate(metric = "temp_raw")
 
 # The data are indeed different across the entire range of when data was collected
 # Now, create figure
@@ -554,38 +603,34 @@ smooth_data <- ggplot_build(p)$data[[2]] %>%
   dplyr::mutate(Type = as.factor(ifelse(fill == "red", "Invaded", "Pristine")))
 
 # Test of equal variances and normality
-temp_smooth_aov <- aov(y ~ Type, data = smooth_data)
-temp_smooth_resid <- residuals(temp_smooth_aov)
-temp_smooth_shapiro <- shapiro.test(temp_smooth_resid) %>% 
-  tidy() %>% dplyr::mutate(stat_name = names(statistic))
-temp_smooth_levene <- leveneTest(y ~ Type, data = smooth_data) %>% drop_na()
+
+temp_smooth_shapiro <- smooth_data %>% 
+  group_by(Type) %>% 
+  shapiro_test(y) %>% mutate(metric = "temp_smooth")
 
 # The smoothed data are not normal, proceed with Mann Whitney test
-temp_smooth_analysis <- wilcox.test(y ~ Type, data = smooth_data) %>% 
-  tidy() %>% dplyr::mutate(stat_name = names(statistic))
+temp_smooth_analysis <- smooth_data %>% wilcox_test(y ~ Type) %>% 
+  add_significance() %>% mutate(metric = "temp_smooth")
+temp_smooth_effect <- smooth_data %>% wilcox_effsize(y ~ Type) %>% 
+  mutate(metric = "temp_smooth")
 
 # Again, these smoothed values show significant differences
+# Prep outputs
+temp_shapiro <- rbind(temp_shapiro, temp_smooth_shapiro)
+temp_ttest <- rbind(temp_analysis, temp_smooth_analysis)
+temp_effect <- rbind(temp_effect, temp_smooth_effect)
 
 # Write outputs
-st_write(temp_sites, file.path(layer_dir, "all_thermochron_locations.gpkg"), 
-         delete_layer = TRUE, quiet = TRUE)
-st_write(site_list, file.path(layer_dir, "thermochron_analysis_locations.gpkg"),
-         delete_layer = TRUE, quiet = TRUE)
-write.csv(temp_shapiro, file.path(results_dir, "04a_temperature_norm_assumption.csv"),
-          row.names = FALSE)
-write.csv(temp_levene, file.path(results_dir, "04b_temperature_eq_var_assumption.csv"),
-          row.names = FALSE)
-write.csv(temp_analysis, file.path(results_dir, "04c_temperature_Mann_Whitney.csv"),
-          row.names = FALSE)
-write.csv(temp_smooth_shapiro, 
-          file.path(results_dir, "05a_temperature_smoothed_norm_assumption.csv"),
-          row.names = FALSE)
-write.csv(temp_smooth_levene, 
-          file.path(results_dir, "05b_temperature_smoothed_eq_var_assumption.csv"),
-          row.names = FALSE)
-write.csv(temp_smooth_analysis, 
-          file.path(results_dir, "05c_temperature_smoothed_Mann_Whitney.csv"),
-          row.names = FALSE)
+st_write(temp_sites, file.path(
+  layer_dir, "all_thermochron_locations.gpkg"), delete_layer = TRUE, quiet = TRUE)
+st_write(site_list, file.path(
+  layer_dir, "thermochron_analysis_locations.gpkg"), delete_layer = TRUE, quiet = TRUE)
+write.csv(temp_shapiro, file.path(
+  results_dir, "03a_temperature_norm_assumptions.csv"), row.names = FALSE)
+write.csv(temp_ttest, file.path(
+  results_dir, "03b_temperature_ttests.csv"), row.names = FALSE)
+write.csv(temp_effect, file.path(
+  results_dir, "03c_temperature_effects.csv"), row.names = FALSE)
 
 ```
 
