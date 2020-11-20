@@ -53,14 +53,18 @@ one_way <- lapply(seq_along(vars), function(x) {
   
   # If not normal, log transform
   if(!all(norm$normal) && nrow(norm[norm$normal, ]) < 5) {
-    z <- dplyr::mutate(y, val = log10(val + abs(min(val)) + 1))
+    z <- dplyr::mutate(y, val = case_when(
+      min(val) <= 0 ~ log10(val + abs(min(val)) + 1),
+      TRUE ~ log10(val)))
     norm <- group_by(z, Treatment) %>% 
       shapiro_test(val) %>% 
       dplyr::mutate(normal = p > 0.05, method = "log")
     
     # If still not normal, square root transform
     if(!all(norm$normal) && nrow(norm[norm$normal, ]) < 5) {
-      z <- dplyr::mutate(y, val = sqrt(val + abs(min(val))))
+      z <- dplyr::mutate(y, val = case_when(
+        min(val) < 0 ~ sqrt(val + abs(min(val))), 
+        TRUE ~ sqrt(val)))
       norm <- group_by(z, Treatment) %>% 
         shapiro_test(val) %>% 
         dplyr::mutate(normal = p > 0.05, method = "sqrt")
@@ -219,7 +223,7 @@ rep_anova <- lapply(ls[!endsWith(names(ls), "nozero")], function(x) {
   # Effect of time at each level of treatment
   one_way_time <- group_by(x, Treatment) %>%
     anova_test(dv = value, wid = Rep, within = name) %>%
-    get_anova_table()%>%
+    get_anova_table() %>%
     adjust_pvalue(method = "bonferroni")
   # Pairwise comparisons between time points
   pwc_time <- group_by(x, Treatment) %>%
@@ -276,7 +280,7 @@ plots <- lapply(ls, function(x) {
       legend.title = element_text(face = "bold", size = 14),
       panel.grid.major = element_blank(),
       panel.grid.minor = element_blank(),
-      panel.spacing = unit(-0.5, "lines"),
+      panel.spacing = unit(0, "lines"),
       axis.text = element_text(colour = "black"),
       axis.text.x = element_blank(),
       axis.ticks.x = element_blank(),
@@ -331,5 +335,20 @@ names(field_sum_nozero) <- gsub("_1", "_mean", names(field_sum_nozero))
 
 write.csv(field_sum_nozero, file.path(results_dir, "field_summary_nozero.csv"), row.names = FALSE)
 write.csv(field_sum, file.path(results_dir, "field_summary.csv"), row.names = FALSE)
+
+## Extra stuff
+library(weathercan)
+sample_sites <- st_read("./01_Spatial_Data/results/study_site_coordinates.csv",
+                        crs = 3005, 
+                        options = c("X_POSSIBLE_NAMES=X","Y_POSSIBLE_NAMES=Y"))
+center <- st_coordinates(st_transform(st_centroid(st_as_sfc(st_bbox(sample_sites))), 4326))
+stations <- unique(stations_search(coords = c(center[2], center[1]))$station_id)
+weather <- weather_dl(stations, start = "2018-05-01", end = "2018-07-30")
+
+hot_day <- weather[which.max(weather$temp), ]
+cold_day <- weather[which.min(weather$temp), ]
+
+temp_high <- hot_day$temp
+temp_low <- cold_day$temp
 
 ```
