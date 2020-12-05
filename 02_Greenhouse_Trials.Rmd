@@ -252,6 +252,28 @@ pwc_treatment <- lapply(bmass_analysis, function(x) {
 # effect ('Soil_Type:Soil_Treatment').
 # Most of the differences are from using AC in the soils (which killed everything).
 
+# Del Fabbro and Prati's index of soil legacy:
+
+legacy_index <- biomass %>% 
+  dplyr::filter(Soil_Treatment != "Ash") %>% 
+  group_by(Species, Soil_Type, Soil_Treatment) %>% 
+  summarise(mean = mean(TotalMass), .groups = "drop")
+
+legacy <- sapply(unique(biomass$Species), function(x) {
+  legacy <- legacy_index %>% 
+    dplyr::filter(Species == x) %>% 
+    dplyr::select(Soil_Type, Soil_Treatment, mean)
+  
+  legacy <- (legacy[legacy$Soil_Type == "Invaded" & 
+                      legacy$Soil_Treatment == "Con", ]$mean - 
+               legacy[legacy$Soil_Type == "Invaded" & 
+                        legacy$Soil_Treatment == "AC", ]$mean) - 
+    (legacy[legacy$Soil_Type == "Pristine" & 
+              legacy$Soil_Treatment == "Con", ]$mean - 
+       legacy[legacy$Soil_Type == "Invaded" & 
+                legacy$Soil_Treatment == "AC", ]$mean)
+}, USE.NAMES = TRUE)
+
 # Write outputs
 write.csv(analysis_input, file.path(
   results_dir, "01a_biomass_input_data.csv"), row.names = FALSE)
@@ -355,8 +377,9 @@ biomass_plot <- sapply(unique(biomass_summary$Species), function(x) {
   
   # Get significance letters using HSD.test from agricolae package
   
-  df_summary <- HSD.test(aov(sqrt_mass ~ trt, data = df), trt = "trt", group = TRUE, 
-                         alpha = 0.05 / length(unique(df$Soil_Treatment))) %>% 
+  df_summary <- HSD.test(aov(sqrt_mass ~ trt, data = df), trt = "trt", 
+                         group = TRUE, 
+                         alpha = 0.05 / (length(unique(df$Soil_Type)) / 2)) %>% 
     .[c("means", "groups")] %>% 
     lapply(rownames_to_column, "trt") %>% 
     Reduce(f = function(x, y) merge(x, y), x = .) %>% 
@@ -364,7 +387,7 @@ biomass_plot <- sapply(unique(biomass_summary$Species), function(x) {
             dplyr::select(starts_with("Soil")) %>% 
             unite(trt, c("Soil_Type", "Soil_Treatment"), remove = FALSE))
   
-  p <- ggplot(df_summary, aes(Soil_Treatment, Q50, fill = Soil_Type)) +
+  p <- ggplot(df_summary, aes(Soil_Treatment, sqrt_mass, fill = Soil_Type)) +
     geom_bar(
       stat = "identity",
       position = "dodge",
@@ -443,9 +466,10 @@ surv <- read.csv(file.path(data_dir, "greenhouse_raw.csv"), header = TRUE) %>%
   dplyr::mutate(Soil_Type = factor(Soil_Type, levels = c("Invaded", "Pristine")),
                 Soil_Treatment = factor(Soil_Treatment, levels = c("Con", "AC", "Ash")), 
                 germ_rat = Germinants / 5, 
-                deaths = Germinants - Survival, 
+                deaths = ifelse(Germinants == 0, 0, 
+                                ((Germinants - Survival) / Germinants)), 
                 trial_surv = Survival / 5, 
-                germ_surv = ifelse(Survival == 0 & Germinants == 0, 0, 
+                germ_surv = ifelse(Germinants == 0, 0, 
                                    Survival / Germinants))
 
 # Create summarized results
@@ -539,17 +563,17 @@ friedman_custom <- function(x, dv) {
       mutate(Soil_Type = paste0(Soil_Type, "_", row_number())) %>% 
       ungroup()
     
-    fried_type <- df2 %>% friedman_test(var ~ Soil_Treatment | Soil_Type)
-    fried_treat <- df3 %>% friedman_test(var ~ Soil_Type | Soil_Treatment)
+    fried_type <- df2 %>% rstatix::friedman_test(var ~ Soil_Treatment | Soil_Type)
+    fried_treat <- df3 %>% rstatix::friedman_test(var ~ Soil_Type | Soil_Treatment)
     
-    type_fx <- df2 %>% friedman_effsize(var ~ Soil_Treatment | Soil_Type)
-    treat_fx <- df3 %>% friedman_effsize(var ~ Soil_Type | Soil_Treatment)
+    type_fx <- df2 %>% rstatix::friedman_effsize(var ~ Soil_Treatment | Soil_Type)
+    treat_fx <- df3 %>% rstatix::friedman_effsize(var ~ Soil_Type | Soil_Treatment)
     
     pwc_type <- df2 %>%
-      wilcox_test(var ~ Soil_Type, paired = FALSE, p.adjust.method = "bonferroni")
+      rstatix::wilcox_test(var ~ Soil_Type, paired = FALSE, p.adjust.method = "bonferroni")
     
     pwc_treatment <- df3 %>%
-      wilcox_test(var ~ Soil_Treatment, paired = FALSE, p.adjust.method = "bonferroni")
+      rstatix::wilcox_test(var ~ Soil_Treatment, paired = FALSE, p.adjust.method = "bonferroni")
     
     return(list(fried_type = fried_type, fried_treat = fried_treat, type_fx = type_fx,
                 treat_fx = treat_fx, pwc_type = pwc_type, pwc_treatment = pwc_treatment))
@@ -580,43 +604,89 @@ art_custom <- function(x, dv) {
       dplyr::rename(var = sym(dv))
     
     # Perform aligned rank transformation (ART)
-    m <- art(var ~ Soil_Type * Soil_Treatment + (1|rep), data = df)
+    m <- art(var ~ Soil_Type * Soil_Treatment, data = df)
     
     # Run an ANOVA on the ART responses
-    anova <- anova(m, response = "art") %>% broom::tidy() %>% 
-      dplyr::select(-Term)
-    pwc_type <- emmeans(artlm(m, "Soil_Type"), pairwise ~ Soil_Type)
-    pwc_type <- merge(
-      data.frame(pwc_type$emmeans),
-      data.frame(pwc_type$contrasts) %>% mutate(Soil_Type = "Invaded"), 
-      by = "Soil_Type", all = TRUE)
-    pwc_treatment <- emmeans(artlm(m, "Soil_Treatment"), pairwise ~ Soil_Treatment)
-    pwc_treatment <- cbind(data.frame(pwc_treatment$emmeans, pwc_treatment$contrasts))
+    anova <- anova(m, response = "art") %>% broom::tidy()
     
-    # contrasts P value is adjusted using tukey method for comparing a family
-    # of 6 estimates
-    contrasts <- contrast(emmeans(artlm(m, "Soil_Type:Soil_Treatment"), 
-                                  ~ Soil_Type:Soil_Treatment), method = "pairwise",
-                          interaction = FALSE) %>% 
-      broom::tidy() %>% 
-      dplyr::select(-term) %>% 
-      dplyr::rename(t.ratio = statistic)
-    interaction <- contrast(emmeans(artlm(m, "Soil_Type:Soil_Treatment"), 
-                                    ~ Soil_Type:Soil_Treatment), method = "pairwise",
-                            interaction = TRUE) %>% 
-      broom::tidy() %>% 
-      dplyr::select(-term) %>% 
-      dplyr::rename(t.ratio = statistic)
+    # Explore main effects
+    m_type <- artlm(m, "Soil_Type")
+    m_trt <- artlm(m, "Soil_Treatment")
     
-    df <- dplyr::rename(df, !!dv := var)
+    aov_type <- m_type$model %>% 
+      group_by(Soil_Treatment) %>% 
+      anova_test(.y ~ Soil_Type, error = m_type)
+    aov_trt <- m_trt$model %>% 
+      group_by(Soil_Type) %>% 
+      anova_test(.y ~ Soil_Treatment, error = m_trt)
+    
+    pwc_type <- if(all(aov_type$p < 0.05)) {
+      m_type$model %>% 
+        group_by(Soil_Type) %>% 
+        emmeans_test(.y ~ Soil_Treatment, p.adjust.method = "bonferroni") %>% 
+        add_xy_position(x = "Soil_Type")
+    } else {
+      m_type$model %>% 
+        group_by(Soil_Type) %>% 
+        pairwise_t_test(.y ~ Soil_Treatment, p.adjust.method = "bonferroni") %>% 
+        add_xy_position(x = "Soil_Type")
+    }
+    
+    pwc_treatment <- if(all(aov_trt$p < 0.05)) {
+      m_trt$model %>% 
+        group_by(Soil_Treatment) %>% 
+        emmeans_test(.y ~ Soil_Type, p.adjust.method = "bonferroni") %>% 
+        add_xy_position(x = "Soil_Treatment")
+    } else {
+      m_trt$model %>% 
+        group_by(Soil_Treatment) %>% 
+        pairwise_t_test(.y ~ Soil_Type, p.adjust.method = "bonferroni") %>% 
+        add_xy_position(x = "Soil_Treatment")
+    }
+    
+    df <- dplyr::select(df, Soil_Type, Soil_Treatment, Species, var) %>% 
+      dplyr::mutate(soil_type_aligned_ranks = m_type$model$.y,
+                    soil_trt_aligned_ranks = m_trt$model$.y)
+    
+    bxp_type <- ggboxplot(
+      df, x = "Soil_Type", y = "soil_type_aligned_ranks", 
+      color = "Soil_Treatment", palette = "jco") + 
+      stat_pvalue_manual(pwc_type)
+    
+    bxp_treatment <- ggboxplot(
+      df, x = "Soil_Treatment", y = "soil_trt_aligned_ranks", 
+      color = "Soil_Type", palette = "jco") + 
+      stat_pvalue_manual(pwc_treatment)
+    
+    # Output PWC's more simply
+    pwc_type <- data.frame(pwc_type) %>% 
+      dplyr::select(-any_of(c("p.signif", "p.adj.signif", "y.position", "groups", 
+                              "x", "xmin", "xmax", "df", "statistic"))) %>% 
+      {if(!"n1" %in% names(.)) {
+        dplyr::mutate(., n1 = (df %>% group_by(Soil_Type, Soil_Treatment) %>% 
+                                 summarise(n = n(), .groups = "drop") %>% 
+                                 pull(n))[1], n2 = n1)
+      } else dplyr::mutate(., term = "Soil_Treatment")} 
+    
+    pwc_treatment <- data.frame(pwc_treatment) %>% 
+      dplyr::select(-any_of(c("p.signif", "p.adj.signif", "y.position", "groups", 
+                              "x", "xmin", "xmax", "df", "statistic"))) %>% 
+      {if(!"n1" %in% names(.)) {
+        dplyr::mutate(., n1 = (df %>% group_by(Soil_Type, Soil_Treatment) %>% 
+                                 summarise(n = n(), .groups = "drop") %>% 
+                                 pull(n))[1], n2 = n1)
+      } else dplyr::mutate(., term = "Soil_Type")} 
+    
     return(list(
-      data = df, model = m, anova = anova, pwc_type = pwc_type, 
-      pwc_treatment = pwc_treatment, contrasts = contrasts, interaction = interaction))
+      data = df, model = m, two_way = anova, one_way_type = aov_type,
+      one_way_treatment = aov_trt, pwc_type = pwc_type, 
+      pwc_treatment = pwc_treatment, bxp_type = bxp_type, bxp_trt = bxp_treatment))
   }, simplify = FALSE, USE.NAMES = TRUE) 
 }
 
 death_art <- art_custom(surv_trans, "deaths")
-death_out <- sapply(names(death_art$RF)[names(death_art$RF) != "model"], function(x) {
+death_out <- sapply(names(death_art$RF)[!names(death_art$RF) %in% c(
+  "model", "bxp_type", "bxp_trt")], function(x) {
   do.call(rbind, lapply(death_art, "[[", x))}, simplify = FALSE, USE.NAMES = TRUE) %>% 
   lapply(function(x) 
     x %>% 
@@ -626,7 +696,8 @@ death_out <- sapply(names(death_art$RF)[names(death_art$RF) != "model"], functio
       dplyr::mutate(Species = substr(Species, 1, 2)))
 
 trial_surv_art <- art_custom(surv_trans, "trial_surv")
-trial_surv_out <- sapply(names(trial_surv_art$RF)[names(trial_surv_art$RF) != "model"], function(x) {
+trial_surv_out <- sapply(names(trial_surv_art$RF)[!names(death_art$RF) %in% c(
+  "model", "bxp_type", "bxp_trt")], function(x) {
   do.call(rbind, lapply(trial_surv_art, "[[", x))}, simplify = FALSE, USE.NAMES = TRUE) %>% 
   lapply(function(x) 
     x %>% 
@@ -636,7 +707,8 @@ trial_surv_out <- sapply(names(trial_surv_art$RF)[names(trial_surv_art$RF) != "m
       dplyr::mutate(Species = substr(Species, 1, 2)))
 
 germ_surv_art <- art_custom(surv_trans, "germ_surv")
-germ_surv_out <- sapply(names(germ_surv_art$RF)[names(germ_surv_art$RF) != "model"], function(x) {
+germ_surv_out <- sapply(names(germ_surv_art$RF)[!names(death_art$RF) %in% c(
+  "model", "bxp_type", "bxp_trt")], function(x) {
   do.call(rbind, lapply(germ_surv_art, "[[", x))}, simplify = FALSE, USE.NAMES = TRUE) %>% 
   lapply(function(x) 
     x %>% 
@@ -657,7 +729,8 @@ germ_rat_out <- sapply(names(germ_rat_analysis$RF)[
       dplyr::mutate(Species = substr(Species, 1, 2)))
 
 # Prepare data for saving
-germ_rat_analysis_input <- lapply(bmass_analysis, "[[", "data") %>% do.call(rbind, .) %>% 
+germ_rat_analysis_input <- lapply(germ_rat_analysis, "[[", "data") %>%
+  do.call(rbind, .) %>% 
   remove_rownames()
 
 germ_rat_two_way <- lapply(germ_rat_analysis, function(x) {
@@ -745,16 +818,16 @@ lapply(c("death", "germ_surv", "trial_surv"), function(x) {
     results_dir, paste0(id, "a_", x, "_normal_assumption.csv")), row.names = FALSE)
   write.csv(var_eq_assum, file.path(
     results_dir, paste0(id, "b_", x, "_var_eq_assumption.csv")), row.names = FALSE)
-  write.csv(y$anova, file.path(
+  write.csv(y$two_way, file.path(
     results_dir, paste0(id, "c_", x, "_two_way_anova.csv")), row.names = FALSE)
-  write.csv(y$contrasts, file.path(
-    results_dir, paste0(id, "d_", x, "_contrasts.csv")), row.names = FALSE)
+  write.csv(y$one_way_type, file.path(
+    results_dir, paste0(id, "d_", x, "_one_way_soil_type.csv")), row.names = FALSE)
+  write.csv(y$one_way_treatment, file.path(
+    results_dir, paste0(id, "e_", x, "_one_way_soil_treatment.csv")), row.names = FALSE)
   write.csv(y$pwc_treatment, file.path(
-    results_dir, paste0(id, "e_", x, "_pairwise_soil_treatment.csv")), row.names = FALSE)
-  write.csv(y$pwc_type, file.path(
     results_dir, paste0(id, "f_", x, "_pairwise_soil_type.csv")), row.names = FALSE)
-  write.csv(y$interaction, file.path(
-    results_dir, paste0(id, "g_", x, "_interactions.csv")), row.names = FALSE)
+  write.csv(y$pwc_type, file.path(
+    results_dir, paste0(id, "g_", x, "_pairwise_soil_treatment.csv")), row.names = FALSE)
 })
 
 ```
@@ -781,8 +854,9 @@ surv_plots <- sapply(plots, function(x) {
   iter <- sapply(unique(df$Species), function(y) {
     df2 <- dplyr::filter(df, Species == y)
     
-    df2_summary <- HSD.test(aov(data ~ trt, data = df2), trt = "trt", group = TRUE, 
-                            alpha = 0.05 / length(unique(df2$Soil_Treatment))) %>% 
+    df2_summary <- HSD.test(aov(data ~ trt, data = df2), trt = "trt", 
+                            group = TRUE, 
+                            alpha = 0.05 / length(unique(df2$Soil_Type))) %>% 
       .[c("means", "groups")] %>% 
       lapply(rownames_to_column, "trt") %>% 
       Reduce(f = function(x, y) merge(x, y), x = .) %>% 
@@ -798,12 +872,12 @@ surv_plots <- sapply(plots, function(x) {
           ymax = data + std),
         size = 1, width = 0.3, position = position_dodge(0.9)) +
       ggtitle(ifelse(x == plots[1], ifelse(y == "RF", "Rough Fescue", "Spotted Knapweed"), "")) +
-      xlab("Soil Site") +
+      xlab("Soil Type") +
       ylab(case_when(
-        x == "germ_rat" ~ "Germination Rate\nafter 1 month",
-        x == "deaths" ~ "Mean deaths\nper pot",
-        x == "trial_surv" ~ "90-day Survival Rate", 
-        x == "germ_surv" ~ "Survival Rate of\nGerminated Individuals",
+        x == "germ_rat" ~ "Germination Rate",
+        x == "deaths" ~ "Death Rate",
+        x == "trial_surv" ~ "Trial Survival Rate", 
+        x == "germ_surv" ~ "Germination Survival Rate",
         TRUE ~ "error")) +
       theme_classic(base_size = 16) +
       theme(
@@ -828,7 +902,7 @@ surv_plots <- sapply(plots, function(x) {
         name = "Soil Amendment:") +
       scale_y_continuous(
         expand = c(0, 0), 
-        limits = c(0, ifelse(x == "deaths", 5, 1.5))) +
+        limits = c(0, 1.5)) +
       scale_x_discrete(labels = c(Invaded = "Invaded", Pristine = "Pristine")) +
       geom_text(aes(label = groups, y = data + std), 
                 position = position_dodge(0.9),
@@ -838,7 +912,11 @@ surv_plots <- sapply(plots, function(x) {
   
   # final <- ggarrange(plotlist = iter, common.legend = TRUE, legend = "none")
   
-}, simplify = TRUE, USE.NAMES = TRUE)
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+# Rearrange
+surv_plots <- unlist(surv_plots[c(
+  "germ_rat", "deaths", "germ_surv", "trial_surv")], recursive = FALSE)
 
 final <- ggarrange(plotlist = surv_plots, common.legend = TRUE, legend = "bottom", 
                    ncol = 2, nrow = 4) +
@@ -958,7 +1036,7 @@ analyzer_plots <- sapply(c("Nitrogen", "Carbon", "Hydrogen"), function(x) {
   
   p <- ggplot(df, aes(Soil_Type, data, fill = Soil_Treatment)) +
     geom_boxplot(lwd = 0.6, color = "black", width = 1) +
-    xlab("Soil Site") +
+    xlab("Soil Type") +
     ylab(paste0("Total ", x, " (%)"))  +
     theme_classic(base_size = 14) +
     theme(

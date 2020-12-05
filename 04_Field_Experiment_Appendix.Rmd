@@ -47,41 +47,35 @@ one_way <- lapply(seq_along(vars), function(x) {
   # Normality - if 5/7 groups pass then pass
   y <- dplyr::rename(field, val = vars[x]) %>% 
     dplyr::select(Treatment, val)
-  norm <- group_by(y, Treatment) %>% 
-    shapiro_test(val) %>% 
-    dplyr::mutate(normal = p > 0.05, method = "raw")
+  
+  norm <- shapiro_test(residuals(lm(val ~ Treatment, data = y)))
   
   # If not normal, log transform
-  if(!all(norm$normal) && nrow(norm[norm$normal, ]) < 5) {
+  if(norm$p.value <= 0.05) {
     z <- dplyr::mutate(y, val = case_when(
       min(val) <= 0 ~ log10(val + abs(min(val)) + 1),
       TRUE ~ log10(val)))
-    norm <- group_by(z, Treatment) %>% 
-      shapiro_test(val) %>% 
-      dplyr::mutate(normal = p > 0.05, method = "log")
+    
+    norm <- shapiro_test(residuals(lm(val ~ Treatment, data = z)))
     
     # If still not normal, square root transform
-    if(!all(norm$normal) && nrow(norm[norm$normal, ]) < 5) {
+    if(norm$p.value <= 0.05) {
       z <- dplyr::mutate(y, val = case_when(
         min(val) < 0 ~ sqrt(val + abs(min(val))), 
         TRUE ~ sqrt(val)))
-      norm <- group_by(z, Treatment) %>% 
-        shapiro_test(val) %>% 
-        dplyr::mutate(normal = p > 0.05, method = "sqrt")
+      norm <- shapiro_test(residuals(lm(val ~ Treatment, data = z)))
       
       # If still not normal, square transform
-      if(!all(norm$normal) && nrow(norm[norm$normal, ]) < 5) {
+      if(norm$p.value <= 0.05) {
         z <- dplyr::mutate(y, val = val ^ 2)
-        norm <- group_by(z, Treatment) %>% 
-          shapiro_test(val) %>% 
-          dplyr::mutate(normal = p > 0.05, method = "sqr")
+        norm <- shapiro_test(residuals(lm(val ~ Treatment, data = z)))
       }
     }
   } else z <- y
   
   # If still not normal, run Kruskal Wallis test on untransformed data with 
   # pairwise comparisons. Not sure which is better to use (dunn vs wilcox)
-  if(!all(norm$normal) && nrow(norm[norm$normal, ]) < 5) {
+  if(norm$p.value <= 0.05) {
     kruskal <- kruskal_test(val ~ Treatment, data = y) %>% 
       dplyr::mutate(test = "Kruskal")
     pwc_dunn <- dunn_test(val ~ Treatment, data = y, p.adjust.method = "bonferroni") %>% 
@@ -177,6 +171,16 @@ rep_anova <- lapply(ls[!endsWith(names(ls), "nozero")], function(x) {
   # Normality assumption requires at least 3 and 2 unique values to compute
   shapiro <- group_by(x, Treatment, name) %>% 
     mutate(n = length(unique(value))) %>% 
+    # ungroup(name) %>% 
+    # mutate(n = ifelse(any(n == 1), 1, n)) %>% 
+    # group_by(name, .add = TRUE) %>% 
+    dplyr::filter(n > 1) %>% 
+    dplyr::select(-n) %>% 
+    dplyr::rename(val = value) %>% 
+    shapiro_test(val) %>% 
+    dplyr::mutate(normal = p > 0.05)
+  
+  shapiro <- mutate(x, n = length(unique(value))) %>% 
     # ungroup(name) %>% 
     # mutate(n = ifelse(any(n == 1), 1, n)) %>% 
     # group_by(name, .add = TRUE) %>% 

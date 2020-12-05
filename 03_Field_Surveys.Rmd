@@ -70,6 +70,10 @@ cov_summary <- lapply(list(shannon = shannon, simpson = simpson, richness = rich
                 metric = factor(metric, levels = c("shannon", "simpson", "richness")), 
                 Site = as.factor(Site))
 
+cov_sum_stats <- cov_summary %>% 
+  group_by(Site, metric) %>% 
+  get_summary_stats(value)
+
 # Want to perform t-test, so perform assumptions starting with if variables are 
 # equal (shapiro test), and then if the data are normal 
 ttest_assum <- function(x, dv, rm_outliers = TRUE) {
@@ -427,6 +431,14 @@ litter <- read.csv(file.path(data_dir, "litter_bg_data.csv"), header = TRUE) %>%
   separate(Site_ID, c("Site", "Rep"), remove = FALSE) %>% 
   mutate(Rep = as.numeric(Rep), Site = as.factor(Site))
 
+litter_sum_stats <- litter %>% 
+  group_by(Site) %>% 
+  get_summary_stats(Litter)
+
+bg_sum_stats <- litter %>% 
+  group_by(Site) %>% 
+  get_summary_stats(`Bare Ground`)
+
 litter_assumptions <- sapply(c("Litter", "Bare Ground"), function(x) {
   df <- dplyr::rename(litter, data = all_of(x))
   shapiro <- df %>% group_by(Site) %>% shapiro_test(data)
@@ -538,6 +550,9 @@ temp_data <- sapply(unique(site_list$Type), function(x) {
 }, simplify = FALSE, USE.NAMES = TRUE)
 
 temp_data_df <- do.call(rbind, temp_data)
+temp_sum_stats <- temp_data_df %>% 
+  group_by(Type) %>% 
+  get_summary_stats(temp)
 
 # Test for normality
 temp_shapiro <- temp_data_df %>% 
