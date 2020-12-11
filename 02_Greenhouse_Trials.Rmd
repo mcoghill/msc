@@ -113,7 +113,11 @@ anova_analysis <- function(x, dv) {
   sapply(unique(x$Species), function(i) {
     df <- dplyr::filter(x, Species == i) %>% 
       dplyr::rename(var = sym(dv)) %>% 
-      dplyr::mutate(Soil_Treatment = factor(Soil_Treatment, levels = c("AC", "Ash", "Con")))
+      droplevels() %>% 
+      dplyr::mutate(Soil_Type = factor(Soil_Type, levels = c("Invaded", "Pristine")),
+                    Soil_Treatment = factor(Soil_Treatment, levels = c("AC", "Ash", "Con"))) %>% 
+      as.data.frame()
+    fct <- max(df$var)
     aov <- df %>% anova_test(var ~ Soil_Type * Soil_Treatment)
     model <- lm(var ~ Soil_Type * Soil_Treatment, data = df)
     aov_type <- df %>% 
@@ -123,74 +127,96 @@ anova_analysis <- function(x, dv) {
       group_by(Soil_Type) %>% 
       anova_test(var ~ Soil_Treatment, error = model)
     
-    pwc_type <- if(all(aov_type$p < 0.05)) {
-      df %>% 
-        group_by(Soil_Type) %>% 
-        emmeans_test(var ~ Soil_Treatment, p.adjust.method = "bonferroni") %>% 
-        add_xy_position(x = "Soil_Type")
+    pwc_type <- group_by(df, Soil_Type) %>% 
+      {if(all(aov_type$p < 0.05)) {
+        emmeans_test(., var ~ Soil_Treatment, p.adjust.method = "bonferroni") 
     } else {
-      df %>% 
-        group_by(Soil_Type) %>% 
-        pairwise_t_test(var ~ Soil_Treatment, p.adjust.method = "bonferroni") %>% 
-        add_xy_position(x = "Soil_Type")
-    }
+        pairwise_t_test(., var ~ Soil_Treatment, p.adjust.method = "bonferroni")
+    }} %>% 
+      add_xy_position(x = "Soil_Type", fun = "mean_sd") %>% 
+      dplyr::mutate(y.position = y.position + (0.05 * fct), 
+                    term = "Soil_Treatment") %>% 
+      dplyr::select(-any_of(c("groups", "n1", "n2", "p.signif", "df", "statistic"))) %>% 
+      as.data.frame()
     
-    pwc_treatment <- if(all(aov_treatment$p < 0.05)) {
-      df %>% 
-        group_by(Soil_Treatment) %>% 
-        emmeans_test(var ~ Soil_Type, p.adjust.method = "bonferroni") %>% 
-        add_xy_position(x = "Soil_Treatment")
+    pwc_treatment <- group_by(df, Soil_Treatment) %>% 
+      {if(all(aov_treatment$p < 0.05)) {
+        emmeans_test(., var ~ Soil_Type, p.adjust.method = "bonferroni")
     } else {
-      df %>% 
-        group_by(Soil_Treatment) %>% 
-        pairwise_t_test(var ~ Soil_Type, p.adjust.method = "bonferroni") %>% 
-        add_xy_position(x = "Soil_Treatment")
-    }
+        pairwise_t_test(., var ~ Soil_Type, p.adjust.method = "bonferroni")
+    }} %>% 
+      add_xy_position(x = "Soil_Treatment", fun = "mean_sd") %>% 
+      dplyr::mutate(y.position = y.position + (0.05 * fct), term = "Soil_Type") %>% 
+      dplyr::select(-any_of(c("groups", "n1", "n2", "p.signif", "df", "statistic"))) %>% 
+      as.data.frame()
     
     tukey <- df %>% 
       tukey_hsd(var ~ Soil_Type * Soil_Treatment) %>% 
       adjust_pvalue(method = "bonferroni")
     
+    df_sum <- df %>% 
+      group_by(Soil_Type, Soil_Treatment) %>% 
+      summarise(across(var, list(mean = ~mean(.x, na.rm = TRUE),
+                                 sd = ~sd(.x, na.rm = TRUE)),
+                       .names = "{.fn}"), .groups = "drop")
+    
     df <- dplyr::rename(df, !!dv := var)
     
-    bxp_type <- ggboxplot(
-      df, x = "Soil_Type", y = dv, 
-      color = "Soil_Treatment", palette = "jco") + 
-      stat_pvalue_manual(pwc_type) + 
-      labs(
-        subtitle = get_test_label(aov, detailed = TRUE),
-        caption = get_pwc_label(pwc_type))
+    # bxp_type <- ggboxplot(
+    #   df, x = "Soil_Type", y = dv, 
+    #   color = "Soil_Treatment", palette = "jco") + 
+    #   stat_pvalue_manual(pwc_type %>% dplyr::filter(p.adj <= 0.05))
+    # 
+    # bxp_treatment <- ggboxplot(
+    #   df, x = "Soil_Treatment", y = dv, 
+    #   color = "Soil_Type", palette = "jco") + 
+    #   stat_pvalue_manual(pwc_treatment %>% dplyr::filter(p.adj <= 0.05))
     
-    bxp_treatment <- ggboxplot(
-      df, x = "Soil_Treatment", y = dv, 
-      color = "Soil_Type", palette = "jco") + 
-      stat_pvalue_manual(pwc_treatment) + 
-      labs(
-        subtitle = get_test_label(aov, detailed = TRUE),
-        caption = get_pwc_label(pwc_treatment))
-    
-    # Output PWC's more simply
-    pwc_type <- data.frame(pwc_type) %>% 
-      dplyr::select(-any_of(c("p.signif", "p.adj.signif", "y.position", "groups", 
-                              "x", "xmin", "xmax", "df", "statistic"))) %>% 
-      {if(!"n1" %in% names(.)) {
-        dplyr::mutate(., n1 = (df %>% group_by(Soil_Type, Soil_Treatment) %>% 
-                                 summarise(n = n(), .groups = "drop") %>% 
-                                 pull(n))[1], n2 = n1)
-      } else dplyr::mutate(., term = "Soil_Treatment")} 
-    
-    pwc_treatment <- data.frame(pwc_treatment) %>% 
-      dplyr::select(-any_of(c("p.signif", "p.adj.signif", "y.position", "groups", 
-                              "x", "xmin", "xmax", "df", "statistic"))) %>% 
-      {if(!"n1" %in% names(.)) {
-        dplyr::mutate(., n1 = (df %>% group_by(Soil_Type, Soil_Treatment) %>% 
-                                 summarise(n = n(), .groups = "drop") %>% 
-                                 pull(n))[1], n2 = n1)
-      } else dplyr::mutate(., term = "Soil_Type")} 
+    p <- ggbarplot(
+      df_sum, x = "Soil_Treatment", y = "mean", fill = "Soil_Type",
+      color = "black", position = position_dodge(0.8), size = 1,
+      width = 0.8, palette = c("#5a5a5a", "#adadad")) + 
+      geom_errorbar(
+        aes(
+          ymin = ifelse(mean - sd < 0, 0.02, mean - sd),
+          ymax = mean + sd), position = position_dodge2(NULL, padding = 0.6), 
+        width = 0.8, size = 1) +
+      stat_pvalue_manual(pwc_treatment %>% dplyr::filter(p.adj <= 0.05), size = 6, 
+                         bracket.size = 1) +
+      scale_x_discrete(labels = c(AC = "AC", Ash = "Ash", Con = "Control")) +
+      scale_y_continuous(
+        expand = c(0, 0), 
+        limits = c(0, ifelse(grepl("mass", dv), 3.25, 1.2)),
+        breaks = {if(grepl("mass", dv)) waiver() else seq(0, 1, 0.25)}) +
+      ggtitle(ifelse(i == "RF", "Rough Fescue", "Spotted Knapweed")) +
+      xlab("Soil Treatment") +
+      ylab(ifelse(dv == "germ_rat", expression(bold(sqrt("Germination Rate"))), 
+                  ifelse(dv == "sqrt_mass", expression(bold(sqrt("Biomass (g)"))), "error"))) +
+      theme_classic(base_size = 16) +
+      theme(
+        text = element_text(family = "Times New Roman"),
+        legend.position = c(0.18, 0.88),
+        legend.background = element_rect(
+          fill = "white", size = 1,linetype = "solid", colour = "black"),
+        legend.title = element_text(face = "bold", size = 18),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text = element_text(colour = "black"),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_line(size = 1, linetype = "solid", colour = "black"),
+        axis.title = element_text(face = "bold", size = 16),
+        axis.title.y = element_text(margin = margin(t = 0, 10, 0, 0)),
+        axis.line = element_line(size = 1), 
+        plot.title = element_text(face = "bold", hjust = 0.5)) +
+      scale_fill_manual(
+        values = c("#5a5a5a", "#adadad"),
+        breaks = c("Invaded", "Pristine"),
+        labels = c("Invaded", "Pristine"),
+        name = "Soil Type:")
     
     return(list(data = df, two_way = aov, tukey = tukey, one_way_type = aov_type,
                 one_way_treatment = aov_treatment, pwc_type = pwc_type, 
-                pwc_treatment = pwc_treatment, plot_type = bxp_type, plot_trt = bxp_treatment))
+                pwc_treatment = pwc_treatment, plot = p))
   }, simplify = FALSE, USE.NAMES = TRUE)
 }
 
@@ -370,76 +396,9 @@ sk_img <- image_read(
   as.raster()
 sk_img_ar <- ncol(rf_img) / nrow(rf_img)
 
-biomass_plot <- sapply(unique(biomass_summary$Species), function(x) {
-  df <- subset(analysis_input, Species == x) %>% 
-    unite(trt, c("Soil_Type", "Soil_Treatment"), remove = FALSE) %>% 
-    dplyr::mutate(Soil_Treatment = factor(Soil_Treatment, levels = c("AC", "Ash", "Con")))
-  
-  # Get significance letters using HSD.test from agricolae package
-  
-  df_summary <- HSD.test(aov(sqrt_mass ~ trt, data = df), trt = "trt", 
-                         group = TRUE, 
-                         alpha = 0.05 / (length(unique(df$Soil_Type)) / 2)) %>% 
-    .[c("means", "groups")] %>% 
-    lapply(rownames_to_column, "trt") %>% 
-    Reduce(f = function(x, y) merge(x, y), x = .) %>% 
-    merge(subset(biomass_summary, Species == x) %>% 
-            dplyr::select(starts_with("Soil")) %>% 
-            unite(trt, c("Soil_Type", "Soil_Treatment"), remove = FALSE))
-  
-  p <- ggplot(df_summary, aes(Soil_Treatment, sqrt_mass, fill = Soil_Type)) +
-    geom_bar(
-      stat = "identity",
-      position = "dodge",
-      colour = "black",
-      size = 1) +
-    geom_errorbar(
-      aes(
-        ymin = ifelse(sqrt_mass - std < 0, 0.02, sqrt_mass - std), 
-        ymax = sqrt_mass + std),
-      size = 1,
-      width = 0.3,
-      position = position_dodge(0.9)) +
-    ggtitle(ifelse(x == "RF", "Rough Fescue", "Spotted Knapweed")) +
-    xlab("Soil Amendment") +
-    ylab(expression(bold(sqrt("Biomass (g)")))) +
-    scale_fill_manual(
-      values = c("#5a5a5a", "#adadad"),
-      breaks = c("Invaded", "Pristine"),
-      labels = c("Invaded", "Pristine"),
-      name = "Soil Type:") +
-    theme_classic(base_size = 14) +
-    theme(
-      rect = element_rect(fill = "transparent"),
-      text = element_text(family = "Times New Roman"),
-      legend.position = c(0.12, 0.88),
-      legend.background = element_rect(
-        fill = "white",
-        size = 1,
-        linetype = "solid",
-        colour = "black"),
-      legend.title = element_text(face = "bold", size = 16),
-      panel.grid.major = element_blank(),
-      panel.grid.minor = element_blank(),
-      axis.text = element_text(colour = "black"),
-      axis.ticks.x = element_blank(),
-      axis.ticks.y = element_line(size = 1, linetype = "solid", colour = "black"),
-      axis.title = element_text(face = "bold", size = 16),
-      axis.title.y = element_text(margin = margin(t = 0, 10, 0, 0)),
-      axis.line = element_line(size = 1),
-      plot.title = element_text(face = "bold", hjust = 0.5)) +
-    scale_y_continuous(
-      expand = c(0, 0), limits = c(0, 3.4), breaks = seq(0, 3, 0.5)) +
-    scale_x_discrete(labels = c(AC = "AC", Ash = "Ash", Con = "Control")) +
-    geom_text(
-      aes(label = groups, y = sqrt_mass + std),
-      position = position_dodge(0.9),
-      vjust = -0.5,
-      family = "serif", 
-      size = 5)
-}, simplify = FALSE, USE.NAMES = TRUE)
-
-biomass_plot <- ggarrange(plotlist = biomass_plot, common.legend = TRUE, legend = "bottom") +
+biomass_plot <- ggarrange(plotlist = list(bmass_analysis$RF$plot,
+                                          bmass_analysis$SK$plot), 
+                          common.legend = TRUE, legend = "bottom") +
   ggsave(file.path(plot_dir, "bmass.png"), width = 6, height = 3, dpi = 300)
 
 # If images are to be included, run the following lines:
@@ -529,7 +488,6 @@ germ_surv_norm <- lapply(surv_assum$germ_surv, "[[", "shapiro_whole") %>%
   do.call(rbind, .) %>% rownames_to_column("Species")
 
 # Didn't help anything, try inversing
-
 surv_trans <- dplyr::mutate(surv, across(all_of(plots[plots != "germ_rat"]), 
                                          ~ 1 / (max(.x + 1) - .x)), 
                             germ_rat = sqrt(germ_rat))
@@ -590,7 +548,7 @@ death_anova <- anova_analysis(surv, "deaths")
 trial_surv_anova <- anova_analysis(surv, "trial_surv")
 germ_surv_anova <- anova_analysis(surv, "germ_surv")
 
-# Try ARTools package 
+# Try ARTools package - more complex but more accurate as well
 surv_trans <- group_by(surv, Soil_Type, Soil_Treatment, Species) %>% 
   dplyr::mutate(rep = as.factor(paste0("r", row_number()))) %>% 
   ungroup()
@@ -601,92 +559,142 @@ art_custom <- function(x, dv) {
     df <- x %>% 
       dplyr::select(-germ_rat) %>% 
       dplyr::filter(Species == i) %>% 
-      dplyr::rename(var = sym(dv))
+      dplyr::rename(var = sym(dv)) %>% 
+      droplevels() %>% 
+      dplyr::mutate(Soil_Type = factor(Soil_Type, levels = c("Invaded", "Pristine")),
+                    Soil_Treatment = factor(Soil_Treatment, levels = c("AC", "Ash", "Con")))
     
     # Perform aligned rank transformation (ART)
     m <- art(var ~ Soil_Type * Soil_Treatment, data = df)
-    
-    # Run an ANOVA on the ART responses
     anova <- anova(m, response = "art") %>% broom::tidy()
     
-    # Explore main effects
-    m_type <- artlm(m, "Soil_Type")
-    m_trt <- artlm(m, "Soil_Treatment")
+    # These are good
+    main_type <- contrast(emmeans(artlm(m, "Soil_Treatment"), ~ Soil_Treatment), 
+                         adjust = "bonferroni") %>% data.frame()
+    main_trt <- contrast(emmeans(artlm(m, "Soil_Type"), ~ Soil_Type), 
+                         adjust = "bonferroni") %>% data.frame()
     
-    aov_type <- m_type$model %>% 
-      group_by(Soil_Treatment) %>% 
-      anova_test(.y ~ Soil_Type, error = m_type)
-    aov_trt <- m_trt$model %>% 
+    # PWC's are good!
+    pwc_type <- contrast(emmeans(artlm(m, "Soil_Treatment"), ~ Soil_Treatment, by = "Soil_Type"),
+                        method = "pairwise", interaction = TRUE, 
+                        adjust = "bonferroni") %>% data.frame() %>% 
+      tidyr::separate(Soil_Treatment_pairwise, c("group1", "group2")) %>% 
+      dplyr::mutate(across(c(group1, group2), ~trimws(.x)))
+    
+    pwc_trt <- contrast(emmeans(artlm(m, "Soil_Type"), ~ Soil_Type, by = "Soil_Treatment"),
+                        method = "pairwise", interaction = TRUE, 
+                        adjust = "bonferroni") %>% data.frame() %>% 
+      tidyr::separate(Soil_Type_pairwise, c("group1", "group2")) %>% 
+      dplyr::mutate(across(c(group1, group2), ~trimws(.x)))
+    
+    # Method for adding proper significance labels
+    pwc_type_data <- artlm(m, "Soil_Type")$model
+    pwc_type_emmeans <- pwc_type_data %>% 
       group_by(Soil_Type) %>% 
-      anova_test(.y ~ Soil_Treatment, error = m_trt)
+      emmeans_test(.y ~ Soil_Treatment, p.adjust.method = "bonferroni") %>% 
+      add_xy_position(x = "Soil_Treatment", fun = "mean_sd") %>% 
+      dplyr::mutate(y.position = y.position + (0.05 * max(pwc_type_data$.y)))
     
-    pwc_type <- if(all(aov_type$p < 0.05)) {
-      m_type$model %>% 
-        group_by(Soil_Type) %>% 
-        emmeans_test(.y ~ Soil_Treatment, p.adjust.method = "bonferroni") %>% 
-        add_xy_position(x = "Soil_Type")
-    } else {
-      m_type$model %>% 
-        group_by(Soil_Type) %>% 
-        pairwise_t_test(.y ~ Soil_Treatment, p.adjust.method = "bonferroni") %>% 
-        add_xy_position(x = "Soil_Type")
-    }
+    pwc_trt_data <- artlm(m, "Soil_Treatment")$model
+    pwc_trt_emmeans <- pwc_trt_data %>% 
+      group_by(Soil_Treatment) %>% 
+      emmeans_test(.y ~ Soil_Type, p.adjust.method = "bonferroni") %>% 
+      add_xy_position(x = "Soil_Treatment", fun = "mean_sd") %>% 
+      dplyr::mutate(y.position = y.position + (0.05 * max(pwc_type_data$.y)))
     
-    pwc_treatment <- if(all(aov_trt$p < 0.05)) {
-      m_trt$model %>% 
-        group_by(Soil_Treatment) %>% 
-        emmeans_test(.y ~ Soil_Type, p.adjust.method = "bonferroni") %>% 
-        add_xy_position(x = "Soil_Treatment")
-    } else {
-      m_trt$model %>% 
-        group_by(Soil_Treatment) %>% 
-        pairwise_t_test(.y ~ Soil_Type, p.adjust.method = "bonferroni") %>% 
-        add_xy_position(x = "Soil_Treatment")
-    }
+    # Join actual PWC's to the emmeans ones to get proper significance labels
+    pwc_type_join <- merge(pwc_type, pwc_type_emmeans) %>% 
+      add_significance("p.value") %>% 
+      dplyr::select(-c(p, p.adj, p.adj.signif, statistic, groups))
     
+    pwc_trt_join <- merge(pwc_trt, pwc_trt_emmeans) %>% 
+      add_significance("p.value") %>% 
+      dplyr::select(-c(p, p.adj, p.adj.signif, statistic, groups))
+      # droplevels()
+    
+    # Place transformed data back into input df
     df <- dplyr::select(df, Soil_Type, Soil_Treatment, Species, var) %>% 
-      dplyr::mutate(soil_type_aligned_ranks = m_type$model$.y,
-                    soil_trt_aligned_ranks = m_trt$model$.y)
+      dplyr::mutate(soil_type_aligned_ranks = m$aligned.ranks$Soil_Type,
+                    soil_trt_aligned_ranks = m$aligned.ranks$Soil_Treatment,
+                    all_aligned_ranks = m$aligned.ranks$`Soil_Type:Soil_Treatment`)
     
-    bxp_type <- ggboxplot(
-      df, x = "Soil_Type", y = "soil_type_aligned_ranks", 
-      color = "Soil_Treatment", palette = "jco") + 
-      stat_pvalue_manual(pwc_type)
+    # Create box plots
+    # bxp_type <- ggboxplot(
+    #   df, x = "Soil_Type", y = "soil_type_aligned_ranks", 
+    #   color = "Soil_Treatment", palette = "jco") + 
+    #   stat_pvalue_manual(pwc_type_join %>% dplyr::filter(p.value <= 0.05), 
+    #                      label = "p.value.signif")
+    # 
+    # bxp_treatment <- ggboxplot(
+    #   df, x = "Soil_Treatment", y = "soil_trt_aligned_ranks",
+    #   color = "Soil_Type", palette = "jco") +
+    #   stat_pvalue_manual(pwc_trt_join %>% dplyr::filter(p.value <= 0.05),
+    #                      label = "p.value.signif")
     
-    bxp_treatment <- ggboxplot(
-      df, x = "Soil_Treatment", y = "soil_trt_aligned_ranks", 
-      color = "Soil_Type", palette = "jco") + 
-      stat_pvalue_manual(pwc_treatment)
+    # Create bar plots
+    pwc_trt_data_sum <- artlm(m, "Soil_Treatment")$model %>% 
+      group_by(Soil_Type, Soil_Treatment) %>% 
+      summarise(across(.y, list(mean = ~mean(.x, na.rm = TRUE),
+                                sd = ~sd(.x, na.rm = TRUE)), 
+                       .names = "{.fn}"), .groups = "drop")
+      # droplevels() %>%
+      # arrange(Soil_Type, Soil_Treatment)
     
-    # Output PWC's more simply
-    pwc_type <- data.frame(pwc_type) %>% 
-      dplyr::select(-any_of(c("p.signif", "p.adj.signif", "y.position", "groups", 
-                              "x", "xmin", "xmax", "df", "statistic"))) %>% 
-      {if(!"n1" %in% names(.)) {
-        dplyr::mutate(., n1 = (df %>% group_by(Soil_Type, Soil_Treatment) %>% 
-                                 summarise(n = n(), .groups = "drop") %>% 
-                                 pull(n))[1], n2 = n1)
-      } else dplyr::mutate(., term = "Soil_Treatment")} 
-    
-    pwc_treatment <- data.frame(pwc_treatment) %>% 
-      dplyr::select(-any_of(c("p.signif", "p.adj.signif", "y.position", "groups", 
-                              "x", "xmin", "xmax", "df", "statistic"))) %>% 
-      {if(!"n1" %in% names(.)) {
-        dplyr::mutate(., n1 = (df %>% group_by(Soil_Type, Soil_Treatment) %>% 
-                                 summarise(n = n(), .groups = "drop") %>% 
-                                 pull(n))[1], n2 = n1)
-      } else dplyr::mutate(., term = "Soil_Type")} 
+    p <- ggbarplot(
+      pwc_trt_data_sum, x = "Soil_Treatment", y = "mean", fill = "Soil_Type",
+      color = "black", position = position_dodge(0.8), size = 1,
+      width = 0.8, palette = c("#5a5a5a", "#adadad")) + 
+      geom_errorbar(
+        aes(
+          ymin = ifelse(mean - sd < 0, 2, mean - sd),
+          ymax = mean + sd), position = position_dodge2(NULL, padding = 0.6), 
+        width = 0.8, size = 1) +
+      stat_pvalue_manual(pwc_trt_join %>% dplyr::filter(p.value <= 0.05), size = 6, 
+                         bracket.size = 1, label = "p.value.signif") +
+      scale_x_discrete(labels = c(AC = "AC", Ash = "Ash", Con = "Control")) +
+      ggtitle(ifelse(i == "RF", "Rough Fescue", "Spotted Knapweed")) +
+      xlab("Soil Treatment") +
+      ylab(ifelse(dv == "germ_rat", expression(bold(sqrt("Germination Rate"))), 
+                  case_when(
+        dv == "deaths" ~ "ART (Death Rate)",
+        dv == "trial_surv" ~ "ART (Trial\nSurvival Rate)", 
+        dv == "germ_surv" ~ "ART (Germination\nSurvival Rate)",
+        TRUE ~ "error"))) +
+      theme_classic(base_size = 16) +
+      theme(
+        text = element_text(family = "Times New Roman"),
+        legend.position = c(0.18, 0.88),
+        legend.background = element_rect(
+          fill = "white", size = 1,linetype = "solid", colour = "black"),
+        legend.title = element_text(face = "bold", size = 18),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text = element_text(colour = "black"),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_line(size = 1, linetype = "solid", colour = "black"),
+        axis.title = element_text(face = "bold", size = 16),
+        axis.title.y = element_text(margin = margin(t = 0, 10, 0, 0)),
+        axis.line = element_line(size = 1), 
+        plot.title = element_text(face = "bold", hjust = 0.5)) +
+      scale_y_continuous(
+        expand = c(0, 0), 
+        limits = c(0, 79)) +
+      scale_fill_manual(
+        values = c("#5a5a5a", "#adadad"),
+        breaks = c("Invaded", "Pristine"),
+        labels = c("Invaded", "Pristine"),
+        name = "Soil Type:")
     
     return(list(
-      data = df, model = m, two_way = anova, one_way_type = aov_type,
-      one_way_treatment = aov_trt, pwc_type = pwc_type, 
-      pwc_treatment = pwc_treatment, bxp_type = bxp_type, bxp_trt = bxp_treatment))
+      data = df, model = m, two_way = anova, main_type = main_type,
+      main_treatment = main_trt, pwc_type = pwc_type_join, 
+      pwc_treatment = pwc_trt_join, plot = p))
   }, simplify = FALSE, USE.NAMES = TRUE) 
 }
 
 death_art <- art_custom(surv_trans, "deaths")
 death_out <- sapply(names(death_art$RF)[!names(death_art$RF) %in% c(
-  "model", "bxp_type", "bxp_trt")], function(x) {
+  "model", "plot")], function(x) {
   do.call(rbind, lapply(death_art, "[[", x))}, simplify = FALSE, USE.NAMES = TRUE) %>% 
   lapply(function(x) 
     x %>% 
@@ -697,7 +705,7 @@ death_out <- sapply(names(death_art$RF)[!names(death_art$RF) %in% c(
 
 trial_surv_art <- art_custom(surv_trans, "trial_surv")
 trial_surv_out <- sapply(names(trial_surv_art$RF)[!names(death_art$RF) %in% c(
-  "model", "bxp_type", "bxp_trt")], function(x) {
+  "model", "plot")], function(x) {
   do.call(rbind, lapply(trial_surv_art, "[[", x))}, simplify = FALSE, USE.NAMES = TRUE) %>% 
   lapply(function(x) 
     x %>% 
@@ -708,7 +716,7 @@ trial_surv_out <- sapply(names(trial_surv_art$RF)[!names(death_art$RF) %in% c(
 
 germ_surv_art <- art_custom(surv_trans, "germ_surv")
 germ_surv_out <- sapply(names(germ_surv_art$RF)[!names(death_art$RF) %in% c(
-  "model", "bxp_type", "bxp_trt")], function(x) {
+  "model", "plot")], function(x) {
   do.call(rbind, lapply(germ_surv_art, "[[", x))}, simplify = FALSE, USE.NAMES = TRUE) %>% 
   lapply(function(x) 
     x %>% 
@@ -767,7 +775,8 @@ germ_rat_anova_treatment <- lapply(germ_rat_analysis, function(x) {
 
 germ_rat_pwc_type <- lapply(germ_rat_analysis, function(x) {
   x$pwc_type %>% 
-    rename_with(~str_c(., "_", paste0(x$data$Species[1])), where(is.numeric))}) %>% 
+    rename_with(~str_c(., "_", paste0(x$data$Species[1])), where(is.numeric)) %>% 
+    dplyr::rename(!!sym(paste0("p.adj.signif_", x$data$Species[1])) := p.adj.signif)}) %>% 
   Reduce(f = function(x, y) merge(x, y), x = .) %>% 
   dplyr::select(sort(tidyselect::peek_vars())) %>% 
   dplyr::relocate(Soil_Type, term, .y., group1, group2) %>% 
@@ -775,7 +784,8 @@ germ_rat_pwc_type <- lapply(germ_rat_analysis, function(x) {
 
 germ_rat_pwc_treatment <- lapply(germ_rat_analysis, function(x) {
   x$pwc_treatment %>% 
-    rename_with(~str_c(., "_", paste0(x$data$Species[1])), where(is.numeric))}) %>% 
+    rename_with(~str_c(., "_", paste0(x$data$Species[1])), where(is.numeric)) %>% 
+    dplyr::rename(!!sym(paste0("p.adj.signif_", x$data$Species[1])) := p.adj.signif)}) %>% 
   Reduce(f = function(x, y) merge(x, y), x = .) %>% 
   dplyr::select(sort(tidyselect::peek_vars())) %>% 
   dplyr::relocate(Soil_Treatment, term, .y., group1, group2) %>% 
@@ -820,13 +830,13 @@ lapply(c("death", "germ_surv", "trial_surv"), function(x) {
     results_dir, paste0(id, "b_", x, "_var_eq_assumption.csv")), row.names = FALSE)
   write.csv(y$two_way, file.path(
     results_dir, paste0(id, "c_", x, "_two_way_anova.csv")), row.names = FALSE)
-  write.csv(y$one_way_type, file.path(
+  write.csv(y$main_type, file.path(
     results_dir, paste0(id, "d_", x, "_one_way_soil_type.csv")), row.names = FALSE)
-  write.csv(y$one_way_treatment, file.path(
+  write.csv(y$main_treatment, file.path(
     results_dir, paste0(id, "e_", x, "_one_way_soil_treatment.csv")), row.names = FALSE)
-  write.csv(y$pwc_treatment, file.path(
-    results_dir, paste0(id, "f_", x, "_pairwise_soil_type.csv")), row.names = FALSE)
   write.csv(y$pwc_type, file.path(
+    results_dir, paste0(id, "f_", x, "_pairwise_soil_type.csv")), row.names = FALSE)
+  write.csv(y$pwc_treatment, file.path(
     results_dir, paste0(id, "g_", x, "_pairwise_soil_treatment.csv")), row.names = FALSE)
 })
 
@@ -836,91 +846,50 @@ Now plot the survival data
 
 ```{r survival plots}
 
-surv_plots <- sapply(plots, function(x) {
-  
-  df <- dplyr::select(surv, Soil_Type, Soil_Treatment, Species, all_of(x)) %>% 
-    dplyr::mutate(Soil_Treatment = factor(Soil_Treatment, levels = c("AC", "Ash", "Con"))) %>% 
-    unite(trt, c("Soil_Type", "Soil_Treatment"), remove = FALSE) %>% 
-    dplyr::rename(data = all_of(x))
-  
-  df_summary <- dplyr::select(
-    surv_summary, 
-    Soil_Type, Soil_Treatment, Species, all_of(paste0(x, c("_mean", "_se")))) %>% 
-    dplyr::mutate(Soil_Treatment = factor(Soil_Treatment, levels = c("AC", "Ash", "Con"))) %>% 
-    unite(trt, c("Soil_Type", "Soil_Treatment"), remove = FALSE) %>% 
-    dplyr::rename(mean = all_of(paste0(x, "_mean")), 
-                  se = all_of(paste0(x, "_se")))
-  
-  iter <- sapply(unique(df$Species), function(y) {
-    df2 <- dplyr::filter(df, Species == y)
-    
-    df2_summary <- HSD.test(aov(data ~ trt, data = df2), trt = "trt", 
-                            group = TRUE, 
-                            alpha = 0.05 / length(unique(df2$Soil_Type))) %>% 
-      .[c("means", "groups")] %>% 
-      lapply(rownames_to_column, "trt") %>% 
-      Reduce(f = function(x, y) merge(x, y), x = .) %>% 
-      merge(subset(df_summary, Species == y) %>% 
-              dplyr::select(starts_with("Soil")) %>% 
-              unite(trt, c("Soil_Type", "Soil_Treatment"), remove = FALSE))
-    
-    p <- ggplot(df2_summary, aes(Soil_Type, data, fill = Soil_Treatment)) + 
-      geom_bar(stat = "identity", position = "dodge", colour = "black", size = 1) +
-      geom_errorbar(
-        aes(
-          ymin = ifelse(data - std < 0, 0.02, data - std), 
-          ymax = data + std),
-        size = 1, width = 0.3, position = position_dodge(0.9)) +
-      ggtitle(ifelse(x == plots[1], ifelse(y == "RF", "Rough Fescue", "Spotted Knapweed"), "")) +
-      xlab("Soil Type") +
-      ylab(case_when(
-        x == "germ_rat" ~ "Germination Rate",
-        x == "deaths" ~ "Death Rate",
-        x == "trial_surv" ~ "Trial Survival Rate", 
-        x == "germ_surv" ~ "Germination Survival Rate",
-        TRUE ~ "error")) +
-      theme_classic(base_size = 16) +
-      theme(
-        text = element_text(family = "Times New Roman"),
-        legend.position = c(0.18, 0.88),
-        legend.background = element_rect(
-          fill = "white", size = 1,linetype = "solid", colour = "black"),
-        legend.title = element_text(face = "bold", size = 18),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        axis.text = element_text(colour = "black"),
-        axis.ticks.x = element_blank(),
-        axis.ticks.y = element_line(size = 1, linetype = "solid", colour = "black"),
-        axis.title = element_text(face = "bold", size = 16),
-        axis.title.y = element_text(margin = margin(t = 0, 10, 0, 0)),
-        axis.line = element_line(size = 1), 
-        plot.title = element_text(face = "bold", hjust = 0.5)) +
-      scale_fill_manual(
-        values = c("dimgray", "darkgray", "gainsboro"),
-        breaks = c("AC","Ash","Con"),
-        labels = c("Activated Carbon", "Ash", "Control"),
-        name = "Soil Amendment:") +
-      scale_y_continuous(
-        expand = c(0, 0), 
-        limits = c(0, 1.5)) +
-      scale_x_discrete(labels = c(Invaded = "Invaded", Pristine = "Pristine")) +
-      geom_text(aes(label = groups, y = data + std), 
-                position = position_dodge(0.9),
-                vjust = -0.5, family = "serif", size = 5)
-    
-  }, simplify = FALSE, USE.NAMES = TRUE)
-  
-  # final <- ggarrange(plotlist = iter, common.legend = TRUE, legend = "none")
-  
-}, simplify = FALSE, USE.NAMES = TRUE)
+surv_plots <- list(germ_rat = germ_rat_analysis, deaths = death_art, 
+                   germ_surv = germ_surv_art, trial_surv = trial_surv_art) %>% 
+  lapply(function(x) lapply(x, "[[", "plot"))
 
-# Rearrange
-surv_plots <- unlist(surv_plots[c(
-  "germ_rat", "deaths", "germ_surv", "trial_surv")], recursive = FALSE)
+# Save individual images
+germ_rat_plot <- ggarrange(
+  plotlist = unlist(surv_plots["germ_rat"], recursive = FALSE), 
+  common.legend = TRUE, legend = "bottom", ncol = 2, nrow = 1) +
+  ggsave(filename = file.path(plot_dir, "germ_rate.png"), 
+         width = 6, height = 3, dpi = 300)
 
-final <- ggarrange(plotlist = surv_plots, common.legend = TRUE, legend = "bottom", 
-                   ncol = 2, nrow = 4) +
-  ggsave(filename = file.path(plot_dir, "survival.png"), width = 8.5, height = 11, dpi = 300)
+deaths_plot <- ggarrange(
+  plotlist = unlist(surv_plots["deaths"], recursive = FALSE), 
+  common.legend = TRUE, legend = "bottom", ncol = 2, nrow = 1) +
+  ggsave(filename = file.path(plot_dir, "death_rate.png"), 
+         width = 6, height = 3, dpi = 300)
+
+germ_surv_rat_plot <- ggarrange(
+  plotlist = unlist(surv_plots["germ_surv"], recursive = FALSE), 
+  common.legend = TRUE, legend = "bottom", ncol = 2, nrow = 1) +
+  ggsave(filename = file.path(plot_dir, "germ_surv_rate.png"), 
+         width = 6, height = 3, dpi = 300)
+
+trial_surv_rat_plot <- ggarrange(
+  plotlist = unlist(surv_plots["trial_surv"], recursive = FALSE), 
+  common.legend = TRUE, legend = "bottom", ncol = 2, nrow = 1) +
+  ggsave(filename = file.path(plot_dir, "trial_surv_rate.png"), 
+         width = 6, height = 3, dpi = 300)
+
+# Make a single large plot of all metrics, but remove the titles from all but
+# the first metric
+surv_plots_no_titles <- c(
+  surv_plots[1], lapply(surv_plots[-1], function(x) {
+  lapply(names(x), function(y) {
+    x[[y]]$labels$title <- ""
+    return(x[[y]])
+  })
+}))
+
+surv_plots_merge <- ggarrange(
+  plotlist = unlist(surv_plots_no_titles, recursive = FALSE), 
+  common.legend = TRUE, legend = "bottom", ncol = 2, nrow = 4) +
+  ggsave(filename = file.path(plot_dir, "survival.png"), 
+         width = 8.5, height = 11, dpi = 300)
   
 
 ```
