@@ -222,7 +222,7 @@ write.csv(ldb_top_inv_sp_by_subzone, file.path(results_dir, "ldb_top_two_inv_by_
 
 Spotted knapweed appears to be most dominant in BG zones in Lac Du Bois, followed by IDF zones. What about throughout BC? Is this consistent with the rest of the province or an artifact of a small sample area?
 
-The below chunk takes a very long time to process (so far ~16 hours total) so prepare to leave this for a while and let it run.
+The below chunk takes a very long time to process (so far ~13-16 hours total) so prepare to leave this for a while and let it run.
 
 ```{r Provincial BEC and IAPP Analyses}
 
@@ -373,13 +373,14 @@ bc_inv_data <- merge(bc_bgc_subzones_ng, merge(
   bc_total_invaded_subzone_ng, bc_sk_by_subzone_ng, all = TRUE), all = TRUE) %>% 
   dplyr::select(-c(starts_with("bgc"), ends_with("rank")))
 
+# Filter to only include subzone names that are in LDB for easier comparison
 bc_bgc_data_limit <- dplyr::filter(bc_bgc_data, SUBZONE %in% ldb_bec$SUBZONE)
 bc_inv_data_limit <- dplyr::filter(bc_inv_data, SUBZONE %in% ldb_bec$SUBZONE)
 
 bc_extra_data <- tribble(
   ~stat, ~value, 
-  "total_inv_area_km2", units::drop_units(sum(bc_total_invaded_subzone_ng$total_inv_area)),
-  "total_inv_ratio", units::drop_units(sum(bc_total_invaded_subzone_ng$total_inv_area) / bc_bgc_area * 100),
+  "total_inv_area_km2", units::drop_units(bc_invaded_area),
+  "total_inv_ratio", bc_invaded_perc,
   "total_inv_records", nrow(bc_iapp),
   "sk_inv_area_km2", units::drop_units(bc_sk_invaded_area),
   "sk_inv_ratio", bc_sk_invaded_perc,
@@ -392,7 +393,7 @@ st_write(bc_iapp, file.path(bc_maps_dir, "bc_iapp.gpkg"), delete_layer = TRUE, q
 st_write(bc_sk_all, file.path(bc_maps_dir, "bc_sk_all.gpkg"), delete_layer = TRUE, quiet = TRUE)
 st_write(bc_sk_by_subzone, file.path(bc_maps_dir, "bc_sk_by_subzone.gpkg"), delete_layer = TRUE, quiet = TRUE)
 st_write(bc_bgc_subzones, file.path(bc_maps_dir, "bc_subzones.gpkg"), delete_layer = TRUE, quiet = TRUE)
-st_write(bc_total_invaded_subzone, file.path(bc_maps_dir, "bc_total_invaded_by_subzone.gpkg"), 
+st_write(bc_all_sp_invaded_subzone, file.path(bc_maps_dir, "bc_all_sp_invaded_subzone.gpkg"), 
          delete_layer = TRUE, quiet = TRUE)
 
 write.csv(bc_bgc_data, file.path(results_dir, "bc_bgc_data_total.csv"), row.names = FALSE)
@@ -408,7 +409,6 @@ Some takeaways from the analysis above:
 SK covers ~.056% of the province of BC. That's not overly concerning; however, it does take up ~3% of the BG zone (7891 ha) and 2.46% of the PP zone (7260 ha), with the largest by area invasion happenning in the IDF zone (31,6677 ha), though this zone is very large and only accounts for 0.71% of the entire invaded area. This is important: this implies that the rate of spread in Lac Du Bois park (24%, 1.8%, and 9.1% in respective zones) is generally much higher than the remainder of the province for some reason!
 
 Each zone has very important values for forestry, First Nations, and conservation of endangered species. With that in mind, this process for finding invasive species trends throughout our province should be looked at more seriously. There are currently nearly 160,000 polygons for invasive plant records throughout BC, perhaps we should see where SK falls in terms of how invasive it is in comparison to other plant species. This will require a further investigation into the text of the "MAP_LABEL" column, below:
-
 
 The analysis above shows that SK and DK are the most invasive plants in BC. Additionally, even though only 0.05% of the province is covered in SK, all invasive plants cover only 0.145% of the province, thus SK accounts for slightly more than 1/3 of the invasive plant cover in BC.
 
