@@ -334,14 +334,18 @@ bc_all_sp_by_subzone <- sapply(unique(bc_all_sp_invaded_subzone$MAP_LABEL), func
     summarise(n = n(), do_union = TRUE, .groups = "drop") %>% 
     dplyr::mutate(inv_area = units::set_units(st_area(.), km^2),
                   inv_ratio = units::drop_units(inv_area / bgc_area * 100)) %>% 
-    st_drop_geometry() %>% 
+    dplyr::arrange(desc(inv_ratio)) %>% 
+    st_cast("MULTIPOLYGON")
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+bc_all_sp_by_subzone_ng <- lapply(bc_all_sp_by_subzone, function(x) {
+  st_drop_geometry(x) %>% 
     dplyr::arrange(desc(inv_ratio)) %>% 
     rownames_to_column("inv_rank") %>% 
     dplyr::arrange(SUBZONE) %>% 
-    dplyr::relocate(inv_rank, .after = last_col())
-}, simplify = FALSE, USE.NAMES = TRUE)
+    dplyr::relocate(inv_rank, .after = last_col())})
 
-bc_all_sp_by_zone <- lapply(bc_all_sp_invaded_subzone, function(x) {
+bc_all_sp_by_zone_ng <- lapply(bc_all_sp_invaded_subzone_ng, function(x) {
   dplyr::mutate(x, ZONE = sapply(strsplit(SUBZONE, "[[:lower:]]"), "[[", 1)) %>% 
     group_by(ZONE) %>% 
     dplyr::summarise(n = sum(n, na.rm = TRUE), 
@@ -356,9 +360,10 @@ bc_all_sp_by_zone <- lapply(bc_all_sp_invaded_subzone, function(x) {
 
 # Finish bc_all_sp_by_subzone
 bc_all_sp_by_subzone <- lapply(bc_all_sp_by_subzone, dplyr::select, -starts_with("bgc"))
+bc_all_sp_by_subzone_ng <- lapply(bc_all_sp_by_subzone_ng, dplyr::select, -starts_with("bgc"))
 
 # Extract total areas as well
-bc_all_sp_tot_area <- lapply(bc_all_sp_by_subzone, function(x) {
+bc_all_sp_tot_area <- lapply(bc_all_sp_by_subzone_ng, function(x) {
   summarise(n = sum(n), inv_area = sum(inv_area)) %>% 
     dplyr::mutate(inv_ratio = units::drop_units(inv_area / bc_bgc_area * 100),
                   species = x)}) %>% 
