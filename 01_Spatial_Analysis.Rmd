@@ -329,7 +329,7 @@ bc_total_invaded_zone_ng <- bc_total_invaded_subzone_ng %>%
 
 # Can also retrieve total invaded area for each species by zone and subzone
 bc_all_sp_by_subzone <- sapply(unique(bc_all_sp_invaded_subzone$MAP_LABEL), function(x) {
-  dplyr::filter(bc_all_sp_invaded_subzone, MAP_LABEL == x) %>% 
+  dplyr::filter(bc_all_sp_invaded_subzone, grepl(x, MAP_LABEL)) %>% 
     group_by(SUBZONE) %>% 
     summarise(n = n(), do_union = TRUE, .groups = "drop") %>% 
     dplyr::mutate(inv_area = units::set_units(st_area(.), km^2),
