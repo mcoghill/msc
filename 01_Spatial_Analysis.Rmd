@@ -13,8 +13,7 @@ suppressMessages(suppressWarnings({
   dt <- "devtools"[!("devtools" %in% installed.packages()[, "Package"])]
   if(length(dt)) install.packages("devtools")
   if(!"devtools" %in% rownames(installed.packages())) install.packages("devtools")
-  ls <- c("tidyverse", "bcmaps", "bcdata", "sf", "foreach", "measurements",
-          "mapview", "leaflet")
+  ls <- c("tidyverse", "bcmaps", "bcdata", "sf", "terra", "raster", "mapview")
   new_packages <- ls[!(ls %in% installed.packages()[, "Package"])]
   if(length(new_packages)) install.packages(new_packages)
   sapply(ls, library, character.only = TRUE, quietly = TRUE)[0] 
@@ -43,7 +42,7 @@ ldb_aoi <- bcdata::bcdc_query_geodata("1130248f-f1a3-4956-8b2e-38d29d3e4af7", cr
   bcdata::collect() %>% 
   sf::st_union()
 
-ldb_area <- conv_unit(units::drop_units(st_area(ldb_aoi)), "m2", "hectare")
+ldb_area <- units::set_units(st_area(ldb_aoi), km^2)
 
 st_write(ldb_aoi, file.path(ldb_maps_dir, "aoi.gpkg"), delete_layer = TRUE, quiet = TRUE)
 
@@ -61,8 +60,11 @@ ldb_bec <- bcmaps::bec(force = TRUE) %>%
   group_by(ZONE, MAP_LABEL) %>% 
   summarise(do_union = TRUE, .groups = "drop") %>% 
   dplyr::rename(SUBZONE = MAP_LABEL) %>% 
-  dplyr::mutate(bgc_area = conv_unit(units::drop_units(st_area(.)), "m2", "hectare")) %>% 
-  st_cast("MULTIPOLYGON")
+  dplyr::mutate(bgc_area = units::set_units(st_area(.), km^2)) %>% 
+  st_cast("MULTIPOLYGON") %>% 
+  sf::st_set_agr("constant")
+
+ldb_bec_ng <- st_drop_geometry(ldb_bec)
 
 st_write(ldb_bec, file.path(ldb_maps_dir, "bec.gpkg"), delete_layer = TRUE, quiet = TRUE)
 
@@ -72,49 +74,135 @@ In this next section, we are going to use the IAPP (Invasive Alien Plant Program
 
 ```{r LDB IAPP plant sites}
 
-# Download invasive plant boundaries from IAPP within the Lac Du Bois area
+# Download invasive plant boundaries from IAPP within the Lac Du Bois area and
+# remove all polygons that are "ZZ" ONLY - polygons mixed with "ZZ" are okay. 
+# ZZ stands for "no plants"
 ldb_iapp <- bcdata::bcdc_query_geodata("10ecf9ad-1555-4043-834a-f5d24a506d59", crs = 3005) %>% 
   bcdata::filter(bcdata::BBOX(sf::st_bbox(ldb_aoi), crs = 3005)) %>% 
   collect() %>% 
+  dplyr::filter(MAP_LABEL != "ZZ") %>% 
   sf::st_set_agr("constant") %>% 
-  {if(nrow(.) > 0) {
-    sf::st_intersection(., ldb_aoi)
-  } else .} %>% 
-  st_cast("MULTIPOLYGON")
+  sf::st_intersection(ldb_aoi) %>% 
+  sf::st_cast("MULTIPOLYGON") %>% 
+  sf::st_set_agr("constant")
 
-# Filter only records containing "SK" label for spotted knapweed
-ldb_sk <- dplyr::filter(ldb_iapp, grepl("SK", MAP_LABEL)) %>% 
-  st_union()
+ldb_iapp_total <- st_union(ldb_iapp)
 
 # Total areas of invasion in Lac Du Bois
-ldb_total_invaded_area <- conv_unit(units::drop_units(st_area(st_union(ldb_iapp))), "m2", "hectare")
-ldb_total_invaded_perc <- ldb_total_invaded_area / ldb_area * 100
-ldb_sk_invaded_area <- conv_unit(units::drop_units(st_area(ldb_sk)), "m2", "hectare")
-ldb_sk_invaded_perc <- ldb_sk_invaded_area / ldb_area * 100 # ~13.38%
+ldb_total_invaded_area <- units::set_units(st_area(ldb_iapp_total), km^2)
+ldb_total_invaded_perc <- units::drop_units(ldb_total_invaded_area / ldb_area * 100)
 
-# Where does spotted knapweed typically invade in Lac Du Bois?
-ldb_sk_by_subzone <- sf::st_set_agr(ldb_bec, "constant") %>% 
-  sf::st_intersection(ldb_sk) %>% 
-  dplyr::mutate(area = conv_unit(units::drop_units(st_area(.)), "m2", "hectare"), 
-                ratio = area / bgc_area * 100) %>% 
-  dplyr::arrange(desc(area)) %>% 
+# Get number of spotted knapweed records and total area of spotted knapweed per 
+# subzone and zone in LDB
+ldb_sk_all <- dplyr::filter(ldb_iapp, grepl("SK", MAP_LABEL))
+ldb_sk_by_subzone <- st_intersection(ldb_sk_all, ldb_bec) %>% 
+  group_by(SUBZONE) %>% 
+  summarise(n = n(), do_union = TRUE, .groups = "drop") %>% 
+  merge(ldb_bec_ng, by = "SUBZONE") %>% 
+  dplyr::mutate(inv_area = units::set_units(st_area(.), km^2),
+                inv_ratio = units::drop_units(inv_area / bgc_area * 100)) %>% 
+  dplyr::arrange(desc(inv_ratio)) %>% 
   st_cast("MULTIPOLYGON")
 
 ldb_sk_by_zone <- dplyr::group_by(ldb_sk_by_subzone, ZONE) %>% 
-  dplyr::summarise(area = sum(area), bgc_area = sum(bgc_area), do_union = TRUE,
-                   .groups = "drop") %>% 
-  dplyr::mutate(ratio = area / bgc_area * 100) %>% 
-  dplyr::arrange(desc(area)) %>% 
+  dplyr::summarise(inv_area = sum(inv_area), bgc_area = sum(bgc_area), 
+                   do_union = TRUE, .groups = "drop") %>% 
+  dplyr::mutate(inv_ratio = units::drop_units(inv_area / bgc_area * 100)) %>% 
+  dplyr::arrange(desc(inv_ratio)) %>% 
   st_cast("MULTIPOLYGON")
 
+# Create single polygon of spotted knapweed invaded area in LDB...not sure how
+# useful this is
+ldb_sk <- st_union(ldb_sk_all)
+
+# Total spotted knapweed invasion in lac du bois
+ldb_sk_invaded_area <- units::set_units(sum(st_area(ldb_sk_by_subzone)), km^2)
+ldb_sk_invaded_perc <- units::drop_units(ldb_sk_invaded_area / ldb_area * 100) # ~13.38%
+
+```
+
+The above chunk focuses on spotted knapweed only - what about all other invasive species?
+
+```{r LDB all species}
+
+# Get the official plant list from the IAPP, it has species names etc.
+curl::curl_download(
+  "https://www2.gov.bc.ca/assets/gov/environment/plants-animals-and-ecosystems/invasive-species/iapp-resources/iapp_species_list_and_map_codes_feb2020.xlsx", 
+  destfile = file.path(data_dir, "iapp_species_list_and_map_codes.xlsx"))
+
+# Read in downloaded table
+bc_iapp_plant_table <- readxl::read_xlsx(
+  file.path(data_dir, "iapp_species_list_and_map_codes.xlsx"), col_names = TRUE) %>% 
+  rename_with(make.names) %>% 
+  dplyr::arrange(Map.Symbol) %>% 
+  dplyr::rename(Map.Label = Map.Symbol) %>% 
+  dplyr::filter(Map.Label != "ZZ")
+
+# Extract vector of plant codes only
+bc_iapp_plants <- bc_iapp_plant_table$Map.Label
+
+# For each species, filter polygons from ldb_iapp that contains that species code
+# and get details per subzone on size and invaded ratio
+ldb_all_sp_by_subzone <- sapply(bc_iapp_plants, function(x) {
+  cat("\nProcessing", x)
+  poly <- dplyr::filter(ldb_iapp, grepl(x, MAP_LABEL)) %>% 
+    {if(nrow(.) > 0) {
+      sf::st_intersection(., ldb_bec) %>% 
+        group_by(SUBZONE) %>% 
+        summarise(n = n(), do_union = TRUE, .groups = "drop") %>% 
+        merge(ldb_bec_ng, by = "SUBZONE") %>% 
+        dplyr::mutate(inv_area = units::set_units(st_area(.), km^2),
+                      inv_ratio = units::drop_units(inv_area / bgc_area * 100),
+                      species = x) %>% 
+        dplyr::arrange(desc(inv_ratio)) %>% 
+        st_cast("MULTIPOLYGON")
+    } else NULL}
+}, simplify = FALSE, USE.NAMES = TRUE) %>% compact()
+
+# Reorganize to look at invasive species in each subzone
+ldb_subzone_by_sp <- sapply(ldb_bec$SUBZONE, function(x) {
+  lapply(ldb_all_sp_by_subzone, dplyr::filter, SUBZONE == x) %>% 
+    {if(all(sapply(., nrow) == 0)) NULL else do.call(rbind, .)}
+}, simplify = FALSE, USE.NAMES = TRUE) %>% compact()
+
+ldb_all_sp_invaded_area <- do.call(rbind, ldb_all_sp_by_subzone) %>% 
+  st_drop_geometry() %>% 
+  group_by(species) %>% 
+  summarise(inv_area = sum(inv_area), .groups = "drop") %>% 
+  dplyr::mutate(inv_ratio = units::drop_units(inv_area / ldb_area * 100)) %>% 
+  dplyr::arrange(desc(inv_ratio))
+
+# Spotted knapweed and diffuse knapweed are top invaders in LDB, followed by 
+# dalmation toadflax and hounds tongue
+
+# Quick facts per subzone
+ldb_top_inv_sp_by_subzone <- do.call(rbind, ldb_all_sp_by_subzone) %>% 
+  st_drop_geometry() %>% 
+  group_by(SUBZONE) %>% 
+  slice_max(inv_ratio, n = 2)
+
+ldb_total_inv_by_subzone <- st_intersection(ldb_iapp, ldb_bec) %>% 
+  group_by(SUBZONE) %>% 
+  summarise(n = n(), do_union = TRUE, .groups = "drop") %>% 
+  merge(ldb_bec_ng, by = "SUBZONE") %>% 
+  dplyr::mutate(inv_area = units::set_units(st_area(.), km^2),
+                inv_ratio = units::drop_units(inv_area / bgc_area * 100)) %>% 
+  dplyr::arrange(desc(inv_ratio)) %>% 
+  st_cast("MULTIPOLYGON")
+
+# Again, spotted knapweed and diffuse knapweed are the top invaders in LDB when
+# divided by subzone
+
+# Create data frames for export
 ldb_stats <- tribble(
   ~stat, ~value, 
   "n_invasive_recordings", nrow(ldb_iapp), 
-  "ldb_sk_area_ha", ldb_sk_invaded_area,
+  "n_sk_recordings", nrow(ldb_sk_all),
+  "ldb_sk_area_km2", units::drop_units(ldb_sk_invaded_area),
   "ldb_sk_perc", ldb_sk_invaded_perc,
-  "ldb_invaded_area_ha", ldb_total_invaded_area, 
-  "ldb_invaded_perc", ldb_total_invaded_perc,
-  "ldb_area", ldb_area,
+  "ldb_all_sp_area_km2", units::drop_units(ldb_total_invaded_area), 
+  "ldb_all_sp_perc", ldb_total_invaded_perc,
+  "ldb_area", units::drop_units(ldb_area)
 )
 
 # Write outputs
@@ -125,61 +213,194 @@ st_write(ldb_sk_by_subzone, file.path(ldb_maps_dir, "iapp_sk_by_subzone.gpkg"),
 st_write(ldb_sk_by_zone, file.path(ldb_maps_dir, "iapp_sk_by_zone.gpkg"),
          delete_layer = TRUE, quiet = TRUE)
 write.csv(ldb_stats, file.path(results_dir, "ldb_stats.csv"), row.names = FALSE)
+write.csv(ldb_all_sp_invaded_area, file.path(results_dir, "ldb_all_sp_areas.csv"), 
+          row.names = FALSE)
+write.csv(ldb_top_inv_sp_by_subzone, file.path(results_dir, "ldb_top_two_inv_by_subzone.csv"), 
+          row.names = FALSE)
 
 ```
 
-Spotted knapwweed appears to be most dominant in BG zones in Lac Du Bois, followed by IDF zones. What about throughout BC? Is this consistent with the rest of the province or an artifact of a small sample area?
+Spotted knapweed appears to be most dominant in BG zones in Lac Du Bois, followed by IDF zones. What about throughout BC? Is this consistent with the rest of the province or an artifact of a small sample area?
+
+The below chunk takes a very long time to process (so far ~16 hours total) so prepare to leave this for a while and let it run.
 
 ```{r Provincial BEC and IAPP Analyses}
+
+options(digits.secs = 3)
+
 # This section takes a while because it deals with province wide data.
+bc_boundary <- bc_bound_hres() %>% 
+  dplyr::select(geometry) %>% 
+  sf::st_set_agr("constant")
 
-# Get full IAPP database
-bc_iapp <- bcdata::bcdc_query_geodata("10ecf9ad-1555-4043-834a-f5d24a506d59", crs = 3005) %>% 
-  collect()
-
-# Select only records containing "SK" in the MAP_LABEL column, and then calculate
-# the total area of all polygons. Need to union them because multiple polygons
-# overlap with one another, so if total area was calculated per polygon you get
-# an overinflated area rather than when they are merged together.
-bc_sk <- dplyr::filter(bc_iapp, grepl("SK", MAP_LABEL)) %>% 
-  st_union()
-
-# Total area of SK invasion in BC
-bc_sk_invaded_area <- conv_unit(units::drop_units(st_area(bc_sk)), "m2", "hectare")
-bc_sk_invaded_perc <- bc_sk_invaded_area / bc_area(what = "land", units = "ha") * 100
-
-# Create BEC subzone layer
+# Create BEC subzone layer for the entire province (~10-15 mins)
 bc_bgc_subzones <- bec() %>% 
-  dplyr::group_by(ZONE, MAP_LABEL) %>% 
-  dplyr::summarise(.groups = "drop", do_union = TRUE) %>% 
+  dplyr::group_by(MAP_LABEL) %>% 
+  dplyr::summarise(do_union = TRUE, .groups = "drop") %>% 
   dplyr::rename(SUBZONE = MAP_LABEL) %>% 
-  dplyr::mutate(bgc_area = conv_unit(units::drop_units(st_area(.)), "m2", "hectare"))
+  sf::st_set_agr("constant") %>%
+  sf::st_intersection(bc_boundary) %>% 
+  dplyr::mutate(bgc_area = units::set_units(st_area(.), km^2)) %>% 
+  sf::st_cast("MULTIPOLYGON") %>% 
+  sf::st_set_agr("constant")
 
-# The IAPP entries have BEC zone info but it's sporadic and incomplete. Instead, 
-# get that information from the actual BEC zone boundaries and calculate the 
-# percentage of a subzone occupied by SK. THIS TOOK ~5 HOURS TO RUN
-bc_sk_by_subzone <- sf::st_set_agr(bc_bgc_subzones, "constant") %>% 
-  sf::st_intersection(bc_sk) %>% 
-  dplyr::mutate(area = conv_unit(units::drop_units(st_area(.)), "m2", "hectare"), 
-                ratio = area / bgc_area * 100) %>% 
-  dplyr::arrange(desc(area))
+# Get total area of BC using the intersected subzone area - this is important 
+# since it removes the adjoining oceanic area from mainland to island included
+# in the BGC subzone layer.
+bc_bgc_area <- sum(bc_bgc_subzones$bgc_area)
 
-# bc_sk_by_subzone <- st_read(file.path(bc_maps_dir, "iapp_sk_by_subzone.gpkg"), quiet = TRUE)
+# Create dataframe for simpler viewing
+bc_bgc_subzones_ng <- st_drop_geometry(bc_bgc_subzones) %>% 
+  dplyr::mutate(bgc_ratio = units::drop_units(bgc_area / bc_bgc_area * 100)) %>% 
+  arrange(desc(bgc_ratio)) %>% 
+  rownames_to_column("size_rank") %>% 
+  arrange(SUBZONE) %>% 
+  dplyr::relocate(size_rank, .after = last_col())
 
-# Much faster to drop geometry column and do simple addition for BEC zone summary
-bc_sk_by_zone <- st_drop_geometry(bc_sk_by_subzone) %>% 
+# Get full IAPP database, filtering the pure "ZZ" calls out (~10-15 minutes)
+bc_iapp <- bcdata::bcdc_query_geodata("10ecf9ad-1555-4043-834a-f5d24a506d59", crs = 3005) %>% 
+  collect() %>% 
+  dplyr::filter(MAP_LABEL != "ZZ") %>% 
+  st_cast("MULTIPOLYGON") %>% 
+  sf::st_set_agr("constant")
+
+# This part takes a very long time, ~ 12 hours to do full IAPP intersection with 
+# BGC subzone layer
+bc_all_sp_invaded_subzone <- sf::st_intersection(bc_iapp, bc_bgc_subzones) %>%
+  (function(x) {cat("Beginning function at", 
+                    format(Sys.time(), "%b %d %H:%M:%OS")); return(x)}) %>% 
+  (function(x) {cat("\nIntersection created", nrow(x), "rows and completed at", 
+                    format(Sys.time(), "%b %d %H:%M:%OS")); return(x)}) 
+
+# For the full IAPP dataset:
+bc_total_invaded_subzone <- group_by(bc_all_sp_invaded_subzone, SUBZONE) %>%
+  summarise(total_n = n(), do_union = TRUE, .groups = "drop") %>% 
+  merge(bc_bgc_subzones_ng, by = "SUBZONE") %>% 
+  dplyr::mutate(total_inv_area = units::set_units(st_area(.), km^2),
+                total_inv_ratio = units::drop_units(total_inv_area / bgc_area * 100))
+
+# For just the spotted knapweed records:
+bc_sk_all <- dplyr::filter(bc_all_sp_invaded_subzone, grepl("SK", MAP_LABEL))
+bc_sk_by_subzone <- group_by(bc_sk_all, SUBZONE) %>% 
+  summarise(sk_n = n(), do_union = TRUE, .groups = "drop") %>% 
+  merge(bc_bgc_subzones_ng, by = "SUBZONE") %>% 
+  dplyr::mutate(sk_inv_area = units::set_units(st_area(.), km^2),
+                sk_inv_ratio = units::drop_units(sk_inv_area / bgc_area * 100)) %>% 
+  dplyr::arrange(desc(sk_inv_ratio)) %>% 
+  st_cast("MULTIPOLYGON")
+
+# Total areas of invasion in BC
+bc_invaded_area <- sum(bc_total_invaded_subzone$total_inv_area)
+bc_invaded_perc <- units::drop_units(bc_invaded_area / bc_bgc_area * 100)
+
+# Total spotted knapweed invasion in BC
+bc_sk_invaded_area <- sum(bc_sk_by_subzone$sk_inv_area)
+bc_sk_invaded_perc <- units::drop_units(bc_sk_invaded_area / bc_bgc_area * 100) 
+
+# Remove geometry columns from total and spotted knapweed only to perform other
+# relevant calculations for output - "ng" = "no geometry"
+bc_total_invaded_subzone_ng <- st_drop_geometry(bc_total_invaded_subzone) %>% 
+  dplyr::arrange(desc(total_inv_ratio)) %>% 
+  rownames_to_column("total_inv_rank") %>% 
+  dplyr::arrange(SUBZONE) %>% 
+  dplyr::relocate(total_inv_rank, .after = last_col()) %>% 
+  dplyr::select(-starts_with("bgc"))
+
+bc_sk_by_subzone_ng <- st_drop_geometry(bc_sk_by_subzone) %>% 
+  dplyr::arrange(desc(sk_inv_ratio)) %>% 
+  rownames_to_column("sk_inv_rank") %>% 
+  dplyr::arrange(SUBZONE) %>% 
+  dplyr::relocate(sk_inv_rank, .after = last_col()) %>% 
+  dplyr::select(-starts_with("bgc"))
+
+# Recreate a "ZONE" column and create summaries by BGC subzone
+bc_total_invaded_zone_ng <- bc_total_invaded_subzone_ng %>% 
+  merge(merge(bc_sk_by_subzone_ng, bc_bgc_subzones_ng, all = TRUE), all = TRUE) %>% 
+  dplyr::mutate(ZONE = sapply(strsplit(SUBZONE, "[[:lower:]]"), "[[", 1)) %>% 
   group_by(ZONE) %>% 
-  summarise(area = sum(area), bgc_area = sum(bgc_area), .groups = "drop") %>% 
-  dplyr::mutate(ratio = area / bgc_area * 100) %>% 
-  dplyr::arrange(desc(ratio))
+  dplyr::summarise(total_n = sum(total_n, na.rm = TRUE), 
+                   total_inv_area = sum(total_inv_area, na.rm = TRUE),
+                   bgc_area = sum(bgc_area, na.rm = TRUE), .groups = "drop",
+                   sk_n = sum(sk_n, na.rm = TRUE),
+                   sk_inv_area = sum(sk_inv_area, na.rm = TRUE)) %>% 
+  dplyr::mutate(total_inv_ratio = units::drop_units(total_inv_area / bgc_area * 100),
+                bgc_ratio = units::drop_units(bgc_area / bc_bgc_area * 100),
+                sk_ratio = units::drop_units(sk_inv_area / bgc_area * 100))
+
+# Can also retrieve total invaded area for each species by zone and subzone
+bc_all_sp_by_subzone <- sapply(unique(bc_all_sp_invaded_subzone$MAP_LABEL), function(x) {
+  dplyr::filter(bc_all_sp_invaded_subzone, MAP_LABEL == x) %>% 
+    group_by(SUBZONE) %>% 
+    summarise(n = n(), do_union = TRUE, .groups = "drop") %>% 
+    dplyr::mutate(inv_area = units::set_units(st_area(.), km^2),
+                  inv_ratio = units::drop_units(inv_area / bgc_area * 100)) %>% 
+    st_drop_geometry() %>% 
+    dplyr::arrange(desc(inv_ratio)) %>% 
+    rownames_to_column("inv_rank") %>% 
+    dplyr::arrange(SUBZONE) %>% 
+    dplyr::relocate(inv_rank, .after = last_col())
+}, simplify = FALSE, USE.NAMES = TRUE)
+
+bc_all_sp_by_zone <- lapply(bc_all_sp_invaded_subzone, function(x) {
+  dplyr::mutate(x, ZONE = sapply(strsplit(SUBZONE, "[[:lower:]]"), "[[", 1)) %>% 
+    group_by(ZONE) %>% 
+    dplyr::summarise(n = sum(n, na.rm = TRUE), 
+                     inv_area = sum(inv_area, na.rm = TRUE),
+                     bgc_area = sum(bgc_area, na.rm = TRUE), .groups = "drop") %>% 
+    dplyr::mutate(inv_ratio = units::drop_units(inv_area / bgc_area * 100),
+                  bgc_ratio = units::drop_units(bgc_area / bc_bgc_area * 100)) %>% 
+    dplyr::arrange(desc(inv_ratio)) %>% 
+    rownames_to_column("inv_rank") %>% 
+    dplyr::arrange(ZONE) %>% 
+    dplyr::relocate(inv_rank, .after = last_col())})
+
+# Finish bc_all_sp_by_subzone
+bc_all_sp_by_subzone <- lapply(bc_all_sp_by_subzone, dplyr::select, -starts_with("bgc"))
+
+# Extract total areas as well
+bc_all_sp_tot_area <- lapply(bc_all_sp_by_subzone, function(x) {
+  summarise(n = sum(n), inv_area = sum(inv_area)) %>% 
+    dplyr::mutate(inv_ratio = units::drop_units(inv_area / bc_bgc_area * 100),
+                  species = x)}) %>% 
+  do.call(rbind, .)
+
+# Create tables for export
+bc_bgc_data <- merge(bc_bgc_subzones_ng, merge(
+  bc_total_invaded_subzone_ng, bc_sk_by_subzone_ng, all = TRUE), all = TRUE) %>% 
+  dplyr::select(SUBZONE, starts_with("bgc"), ends_with("rank"))
+
+bc_inv_data <- merge(bc_bgc_subzones_ng, merge(
+  bc_total_invaded_subzone_ng, bc_sk_by_subzone_ng, all = TRUE), all = TRUE) %>% 
+  dplyr::select(-c(starts_with("bgc"), ends_with("rank")))
+
+bc_bgc_data_limit <- dplyr::filter(bc_bgc_data, SUBZONE %in% ldb_bec$SUBZONE)
+bc_inv_data_limit <- dplyr::filter(bc_inv_data, SUBZONE %in% ldb_bec$SUBZONE)
+
+bc_extra_data <- tribble(
+  ~stat, ~value, 
+  "total_inv_area_km2", units::drop_units(sum(bc_total_invaded_subzone_ng$total_inv_area)),
+  "total_inv_ratio", units::drop_units(sum(bc_total_invaded_subzone_ng$total_inv_area) / bc_bgc_area * 100),
+  "total_inv_records", nrow(bc_iapp),
+  "sk_inv_area_km2", units::drop_units(bc_sk_invaded_area),
+  "sk_inv_ratio", bc_sk_invaded_perc,
+  "sk_inv_records", nrow(bc_sk_all),
+  "total_bc_area_km2", units::drop_units(bc_bgc_area)
+)
 
 # Save as individual files for faster reading in later on if necessary
-st_write(bc_iapp, file.path(bc_maps_dir, "iapp.gpkg"), delete_layer = TRUE, quiet = TRUE)
-st_write(bc_sk, file.path(bc_maps_dir, "sk.gpkg"), delete_layer = TRUE, quiet = TRUE)
-st_write(bc_bgc_subzones, file.path(bc_maps_dir, "bec.gpkg"), delete_layer = TRUE, quiet = TRUE)
-st_write(bc_sk_by_subzone, file.path(bc_maps_dir, "iapp_sk_by_subzone.gpkg"), 
+st_write(bc_iapp, file.path(bc_maps_dir, "bc_iapp.gpkg"), delete_layer = TRUE, quiet = TRUE)
+st_write(bc_sk_all, file.path(bc_maps_dir, "bc_sk_all.gpkg"), delete_layer = TRUE, quiet = TRUE)
+st_write(bc_sk_by_subzone, file.path(bc_maps_dir, "bc_sk_by_subzone.gpkg"), delete_layer = TRUE, quiet = TRUE)
+st_write(bc_bgc_subzones, file.path(bc_maps_dir, "bc_subzones.gpkg"), delete_layer = TRUE, quiet = TRUE)
+st_write(bc_total_invaded_subzone, file.path(bc_maps_dir, "bc_total_invaded_by_subzone.gpkg"), 
          delete_layer = TRUE, quiet = TRUE)
-write.csv(bc_sk_by_zone, file.path(results_dir, "BC_iapp_sk_by_zone.csv"), row.names = FALSE)
+
+write.csv(bc_bgc_data, file.path(results_dir, "bc_bgc_data_total.csv"), row.names = FALSE)
+write.csv(bc_bgc_data_limit, file.path(results_dir, "bc_bgc_data_limit.csv"), row.names = FALSE)
+write.csv(bc_inv_data, file.path(results_dir, "bc_invasive_data_total.csv"), row.names = FALSE)
+write.csv(bc_inv_data_limit, file.path(results_dir, "bc_invasive_data_limit.csv"), row.names = FALSE)
+write.csv(bc_extra_data, file.path(results_dir, "bc_extra_data.csv"), row.names = FALSE)
+write.csv(bc_total_invaded_zone_ng, file.path(results_dir, "bc_zone_inv_data.csv"), row.names = FALSE)
 
 ```
 
@@ -188,92 +409,97 @@ SK covers ~.056% of the province of BC. That's not overly concerning; however, i
 
 Each zone has very important values for forestry, First Nations, and conservation of endangered species. With that in mind, this process for finding invasive species trends throughout our province should be looked at more seriously. There are currently nearly 160,000 polygons for invasive plant records throughout BC, perhaps we should see where SK falls in terms of how invasive it is in comparison to other plant species. This will require a further investigation into the text of the "MAP_LABEL" column, below:
 
-```{r BC Invasive Plant Metrics}
-
-# Extract plant species column
-bc_invasive_plants <- st_drop_geometry(bc_iapp) %>% 
-  dplyr::select(MAP_LABEL)
-
-# Get the official plant list from the IAPP, it has species names etc.
-curl::curl_download(
-  "https://www2.gov.bc.ca/assets/gov/environment/plants-animals-and-ecosystems/invasive-species/iapp-resources/iapp_species_list_and_map_codes_feb2020.xlsx", 
-  destfile = file.path(data_dir, "iapp_species_list_and_map_codes.xlsx"))
-
-bc_iapp_plant_table <- readxl::read_xlsx(
-  file.path(data_dir, "iapp_species_list_and_map_codes.xlsx"), col_names = TRUE) %>% 
-  rename_with(make.names) %>% 
-  dplyr::arrange(Map.Symbol) %>% 
-  dplyr::rename(Map.Label = Map.Symbol)
-
-# Will use the separate function to get columns for different plants, but first
-# need to find out what the longest entry is to find how many columns there will be:
-n_splits <- max(nchar(str_replace_all(bc_invasive_plants$MAP_LABEL, "[^[:alnum:]]", "")), na.rm = TRUE) / 2
-all_plants <- bc_invasive_plants %>% 
-  tidyr::separate(MAP_LABEL, into = paste0("sp", 1:n_splits), sep = " ", extra = "drop") %>% 
-  apply(MARGIN = 2, FUN = unique) %>% 
-  do.call(c, args = .) %>% 
-  unique() %>% na.omit() %>% grep("NA", ., invert = TRUE, value = TRUE) %>% sort()
-
-# There are 184 invasive species recorded in BC. Which ones take up the largest
-# amount of physical space in BC?
-bc_invasive_plant_areas <- foreach(i = 1:length(all_plants), .combine = rbind) %do% {
-  cat(paste0("Working on ", all_plants[i], " [", i, " of ", length(all_plants), "]\n"))
-  dplyr::filter(bc_iapp, grepl(all_plants[i], MAP_LABEL)) %>% 
-    st_union() %>% 
-    st_as_sf() %>% 
-    dplyr::mutate(Map.Label = all_plants[i], 
-                  area = conv_unit(units::drop_units(st_area(.)), "m2", "hectare"))
-} %>% dplyr::rename(geometry = x) %>% 
-  dplyr::select(Map.Label, area) %>% 
-  dplyr::arrange(desc(area)) %>% 
-  st_cast("MULTIPOLYGON") %>% 
-  merge(bc_iapp_plant_table, all.x = TRUE) %>%
-  dplyr::select(c(names(bc_iapp_plant_table), area)) %>% 
-  dplyr::arrange(desc(area))
-  
-# Drop geometry for quick viewing of data
-bc_inv_plant_areas_no_geom <- st_drop_geometry(bc_invasive_plant_areas)
-
-# It turns out that spotted and diffuse knapweed are the most invasive plants on
-# record in BC (ranked 1 and 2, resepectively)
-
-# This takes ~10-15 minutes
-bc_total_invaded_area <- st_union(bc_iapp) %>%
-  st_area() %>% 
-  units::drop_units() %>% 
-  conv_unit("m2", "hectare")
-
-bc_total_invaded_perc <- bc_total_invaded_area / bc_area(what = "land", units = "ha") * 100
-sk_of_all_invaded <- bc_sk_invaded_perc / bc_invaded_perc * 100
-
-# BGC zone additional data:
-bc_bgc_zone_data <- st_drop_geometry(bc_bgc_subzones) %>% 
-  dplyr::group_by(ZONE) %>% 
-  dplyr::summarise(area = sum(bgc_area), .groups = "drop") %>% 
-  dplyr::mutate(ratio = area / sum(area) * 100) %>% 
-  dplyr::arrange(desc(area))
-
-# Concatenate loose results
-bc_stats <- tribble(
-  ~stat, ~value, 
-  "n_invasive_species", length(all_plants), 
-  "bc_invaded_ha", bc_total_invaded_area, 
-  "bc_invaded_percent", bc_total_invaded_perc, 
-  "bc_invaded_SK_ha", bc_sk_invaded_area,
-  "bc_invaded_SK_perc", bc_sk_invaded_perc, 
-  "bc_invaded_SK_as_ratio_to_area_of_all_invasives", sk_of_all_invaded)
-
-# Write outputs
-st_write(bc_invasive_plant_areas, file.path(bc_maps_dir, "iapp_plant_bounds.gpkg"), 
-         delete_layer = TRUE, quiet = TRUE)
-write.csv(bc_inv_plant_areas_no_geom, file.path(results_dir, "iapp_plant_bounds.csv"), 
-          row.names = FALSE)
-write.csv(bc_bgc_zone_data, file.path(results_dir, "BC_bec_zone_data.csv"), row.names = FALSE)
-write.csv(bc_stats, file.path(results_dir, "BC_stats.csv"), row.names = FALSE)
-
-```
 
 The analysis above shows that SK and DK are the most invasive plants in BC. Additionally, even though only 0.05% of the province is covered in SK, all invasive plants cover only 0.145% of the province, thus SK accounts for slightly more than 1/3 of the invasive plant cover in BC.
+
+```{r BC Raster analysis}
+
+dl_dir <- file.path(tempdir()) # Change to suit your needs
+
+# URL's to download tiles for Lac Du Bois
+urls <- c("https://pub.data.gov.bc.ca/datasets/175624/92i/092i15_e.dem.zip", 
+          "https://pub.data.gov.bc.ca/datasets/175624/92i/092i16_w.dem.zip",
+          "https://pub.data.gov.bc.ca/datasets/175624/92i/092i10_e.dem.zip", 
+          "https://pub.data.gov.bc.ca/datasets/175624/92i/092i09_w.dem.zip")
+
+# Merge the files into a single object
+trim <- lapply(urls, function(i) {
+  download.file(url = i, destfile = file.path(dl_dir, basename(i)))
+  z <- unzip(file.path(dl_dir, basename(i)), overwrite = TRUE, 
+             exdir = file.path(dl_dir))
+  unlink(file.path(dl_dir, basename(i)))
+  return(rast(z))
+}) %>% do.call(merge, .) %>% magrittr::set_names("dem")
+
+# Convert to raster object, crop to shape of lac du bois with 1 cell (~25m) buffer
+trim_rast <- raster(trim)
+trim_rast <- crop(trim_rast, extent(st_transform(st_buffer(ldb_bec, 25), 4326)))
+trim_rast[trim_rast < 0] <- -9999
+NAvalue(trim_rast) <- -9999
+
+# Save this DEM as a .asc file to be used in ClimateBC program
+writeRaster(trim_rast, "./trim.asc", overwrite = TRUE)
+
+# Do proper raster datum transformation through raster package, then read as 
+# terra package object when complete
+trim_rast_ext <- projectExtent(trim_rast, crs("+init=epsg:3005"))
+res(trim_rast_ext) <- max(res(trim_rast_ext))
+trim_ext <- rast(trim_rast_ext)
+crs(trim_ext) <- "epsg:3005"
+
+# Do reprojection with now proper extent, and mask to LDB subzone layer
+trim_bca <- project(trim, trim_ext)
+trim_mask <- mask(trim_bca, vect(ldb_bec)) %>% 
+  terra::trim()
+
+# Create BGC subzone dataframe to merge data with later on
+ldb_bec2 <- rownames_to_column(ldb_bec, "ID") %>% 
+  st_drop_geometry() %>% 
+  dplyr::select(-bgc_area)
+
+# Extract mean, min, and max elevations by subzone in LDB
+trim_extract <- as.data.frame(extract(trim_mask, vect(ldb_bec))) %>% 
+  merge(ldb_bec2, by = "ID") %>% 
+  group_by(SUBZONE) %>% 
+  summarise(min = min(dem), max = max(dem), mean = mean(dem), .groups = "drop")
+
+# Load temperature mean, min, and max rasters. Divide by 10 to get real values
+# of temperature instead of integers
+min_sum <- rast("./trim/Year_2017S/Tmin_sm.asc") / 10
+max_sum <- rast("./trim/Year_2017S/Tmax_sm.asc") / 10
+avg_sum <- rast("./trim/Year_2017S/Tave_sm.asc") / 10
+
+# Get min, max, and mean temperatures for each subzone in LDB by reprojecting,
+# masking, and extracting the temperature rasters
+min_subzone <- project(min_sum, "epsg:3005") %>% 
+  mask(vect(ldb_bec)) %>% 
+  extract(vect(ldb_bec)) %>% 
+  as.data.frame() %>% 
+  merge(ldb_bec2, by = "ID") %>% 
+  group_by(SUBZONE) %>% 
+  summarise(min = min(Tmin_sm), .groups = "drop")
+
+max_subzone <- project(max_sum, "epsg:3005") %>% 
+  mask(vect(ldb_bec)) %>% 
+  extract(vect(ldb_bec)) %>% 
+  as.data.frame() %>% 
+  merge(ldb_bec2, by = "ID") %>% 
+  group_by(SUBZONE) %>% 
+  summarise(max = max(Tmax_sm), .groups = "drop")
+
+avg_subzone <- project(avg_sum, "epsg:3005") %>% 
+  mask(vect(ldb_bec)) %>% 
+  extract(vect(ldb_bec)) %>% 
+  as.data.frame() %>% 
+  merge(ldb_bec2, by = "ID") %>% 
+  group_by(SUBZONE) %>% 
+  summarise(mean = mean(Tave_sm), .groups = "drop")
+
+subzone_clim <- merge(min_subzone, merge(max_subzone, avg_subzone))
+write.csv(trim_extract, file.path(results_dir, "elev_by_subzone.csv"), row.names = FALSE)
+write.csv(subzone_clim, file.path(results_dir, "temp_by_subzone.csv"), row.names = FALSE)
+
+```
 
 Next, I want to pull in the spatial data gathered from field work and see what I can capture from that:
 
@@ -322,119 +548,7 @@ st_write(sample_sites, file.path(results_dir, "study_site_coordinates.csv"),
 
 ```
 
-I have all of the necessary shapefiles that I would need. Now, I'd like to create a visually appealing figure for use in my thesis.
-
-```{r Create figures}
-
-fig_dir <- file.path("./01_Spatial_data/figures")
-dir.create(fig_dir, showWarnings = FALSE)
-
-sa_trans <- st_geometry(area_of_invasion) %>% st_transform(4326)
-ldb_trans <- ldb_aoi %>% st_transform(4326)
-ldb_cent <- st_centroid(ldb_aoi) %>% st_transform(4326) %>% st_coordinates()
-l <- leaflet() %>% addProviderTiles("OpenTopoMap") %>% 
-  addPolygons(data = ldb_trans, color = "black", weight = 2, opacity = 1, 
-              fillOpacity = 0.5, fillColor = "green") %>% 
-  addPolygons(data = ldb_sk %>% st_transform(4326), color = "black", weight = 2, opacity = 1, 
-              fillOpacity = 0.5, fillColor = "purple") %>% 
-  addPolygons(data = sa_trans, color = "black", weight = 2, opacity = 1, 
-              fillOpacity = 0.5, fillColor = "red") %>% 
-  addScaleBar("topright", options = c(metric = TRUE, imperial = FALSE)) %>% 
-  addLegend(
-    position = "topleft", colors = c("green", "purple"), opacity = 0.7,
-    labels = c(htmltools::HTML("Lac Du Bois<br/>Grasslands<br/>Protected Area"), 
-               htmltools::HTML("Spotted Knapweed<br/>Invasion (IAPP, 2020)"))
-    )
-
-mapshot(l, file = file.path(fig_dir, "ldb.png"), 
-        vwidth = 350, vheight = 400,
-        remove_controls = c("zoomControl", "layersControl", "homeButton",
-                            "drawToolbar", "easyButton"))
-
-##### View of study area
-
-sa_pts <- st_transform(sample_sites, 4326) %>% 
-  tidyr::separate(Name, c("Site", "Rep"), remove = FALSE)
-sa_cent <- st_centroid(area_of_invasion) %>% st_transform(4326) %>% st_coordinates()
-
-# Get different colored points for inv vs. pri sites
-# https://rstudio.github.io/leaflet/markers.html
-
-pal <- colorFactor(c("darkmagenta", "darkgreen"), domain = c("Pri", "Inv"))
-
-addLegendCustom <- function(map, colors, labels, sizes, opacity = 0.5, ...) {
-  colorAdditions <- paste0(colors, "; border-radius: 50%; width:", sizes, "px; height:", sizes, "px")
-  labelAdditions <- paste0("<div style='display: inline-block;height: ", 
-                           sizes, "px;margin-top: 4px;line-height: ", sizes, "px;'>", 
-                           labels, "</div>")
-
-  return(addLegend(map, colors = colorAdditions, 
-                   labels = labelAdditions, opacity = opacity, ... = ...))
-}
-
-s_step <- leaflet() %>% addProviderTiles("OpenTopoMap") %>% 
-  addPolygons(data = ldb_trans, color = "black", weight = 2, opacity = 1, 
-              fillOpacity = 0.5, fillColor = "green") %>% 
-  addPolygons(data = ldb_sk %>% st_transform(4326), color = "black", weight = 2, opacity = 1, 
-              fillOpacity = 0.5, fillColor = "purple") %>% 
-  addPolygons(data = sa_trans, color = "black", weight = 2, opacity = 1, 
-              fillOpacity = 0.8, fillColor = "red") %>% 
-  setView(lng = st_coordinates(st_centroid(sa_trans))[ ,"X"], 
-          lat = st_coordinates(st_centroid(sa_trans))[ ,"Y"], zoom = 14) %>% 
-  addScaleBar("topright", options = c(metric = TRUE, imperial = FALSE))
-
-s <- leaflet() %>% addProviderTiles("OpenTopoMap") %>% 
-  addPolygons(data = ldb_trans, color = "black", weight = 2, opacity = 1, 
-              fillOpacity = 0.5, fillColor = "green") %>% 
-  addPolygons(data = ldb_sk %>% st_transform(4326), color = "black", weight = 2, opacity = 1, 
-              fillOpacity = 0.5, fillColor = "purple") %>% 
-  addPolygons(data = sa_trans, color = "black", weight = 2, opacity = 1, 
-              fillOpacity = 0.8, fillColor = "red") %>% 
-  setView(lng = st_coordinates(st_centroid(sa_trans))[ ,"X"], 
-          lat = st_coordinates(st_centroid(sa_trans))[ ,"Y"], zoom = 18) %>% 
-  addScaleBar("topright", options = c(metric = TRUE, imperial = FALSE)) %>% 
-  addLegend(
-    position = "topleft", colors = "red", opacity = 0.8, labels = "Study Area") %>% 
-  addLegendCustom(colors = c("darkmagenta", "darkgreen"), labels = c("Invaded", "Pristine"), 
-                  sizes = 10, opacity = 1, position = "topleft", title = "Site") %>% 
-  addCircleMarkers(data = sa_pts, color = ~pal(Site), stroke = FALSE, 
-                   fillOpacity = 1, radius = 5)
-
-# This doesn't work, creates a shiny.tag.list object that doesn't easily output
-# to an image.
-# s2 <- browsable(
-#    tagList(
-#       list(
-#          tags$head(
-#             tags$style(
-#                ".leaflet .legend {
-#                  line-height: 20px;
-#                  font-size: 20px;
-#                  font-weight: bold;
-#                  font-family: Times New Roman;
-#                  }",
-#               ".leaflet .legend i{
-#                 width: 20px;
-#                 height: 20px;
-#                  }"
-#             )
-#          ),
-#        s)))
-# 
-# tag <- plotTag(s2, alt = "", width = 350, height = 400)
-# capturePlot(tag, filename = file.path(fig_dir, "study_area_zoom.png"))
-
-mapshot(s_step, file = file.path(fig_dir, "study_area_zoom.png"), 
-        vwidth = 350, vheight = 400,
-        remove_controls = c("zoomControl", "layersControl", "homeButton",
-                            "drawToolbar", "easyButton"))
-
-mapshot(s, file = file.path(fig_dir, "study_area.png"), 
-        vwidth = 350, vheight = 400,
-        remove_controls = c("zoomControl", "layersControl", "homeButton",
-                            "drawToolbar", "easyButton"))
-
-```
+I have all of the necessary shapefiles that I would need. Now, I'd like to create a visually appealing figure for use in my thesis. I tried for a while to do this in R but found it way too complicated, so I moved to QGIS for more visually appealing figures.
 
 Separately, here is some code for finding all range reference areas within a study area (may also include smaller fencing units as well that are used in rangelands). It took a bit of wrangling but this works decently well, I think...
 
