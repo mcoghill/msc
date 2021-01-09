@@ -233,7 +233,8 @@ rep_anova <- lapply(ls[!endsWith(names(ls), "nozero")], function(x) {
   pwc_time <- group_by(x, Treatment) %>%
     pairwise_t_test(
       value ~ name, paired = TRUE,
-      p.adjust.method = "bonferroni")
+      p.adjust.method = "bonferroni") %>% 
+    add_xy_position(x = "Treatment", fun = "mean_sd")
   
   return(list(
     outliers = outliers, shapiro = shapiro, norm_plot = norm_plot, 
