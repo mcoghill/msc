@@ -215,7 +215,7 @@ write.csv(ldb_top_inv_sp_by_subzone, file.path(results_dir, "ldb_top_two_inv_by_
 
 Spotted knapweed appears to be most dominant in BG zones in Lac Du Bois, followed by IDF zones. What about throughout BC? Is this consistent with the rest of the province or an artifact of a small sample area?
 
-The below chunk takes a very long time to process (so far ~13-16 hours total) so prepare to leave this for a while and let it run.
+The below chunk takes a very long time to process (~12 - 13 hours) so prepare to leave this for a while and let it run. The reason is because the provincial BEC layer has 210 subzones and the province wide IAPP layer has >153,000 rows of data (i.e.: polygons). The intersection process that occurs thus requires 153,000 * 210 = 32,130,000 operations to run. This will only get slower as the number of IAPP polygons increase in the province.
 
 ```{r Provincial BEC and IAPP Analyses}
 
