@@ -219,9 +219,6 @@ The below chunk takes a very long time to process (so far ~13-16 hours total) so
 
 ```{r Provincial BEC and IAPP Analyses}
 
-options(digits.secs = 3)
-t_start <- Sys.time()
-
 # This section takes a while because it deals with province wide data.
 bc_boundary <- bc_bound_hres() %>% 
   dplyr::select(geometry) %>% 
@@ -283,17 +280,28 @@ bc_all_sp_by_subzone <- sapply(bc_iapp_plants, function(x) {
     dplyr::mutate(n_orig = length(unique(id))) %>% 
     group_by(SUBZONE, n_orig) %>% 
     summarise(n = n(), do_union = TRUE, .groups = "drop") %>% 
+    merge(bc_bgc_subzones_ng, by = "SUBZONE") %>% 
     dplyr::mutate(inv_area = units::set_units(st_area(.), km^2),
                   inv_ratio = units::drop_units(inv_area / bgc_area * 100)) %>% 
     dplyr::arrange(desc(inv_ratio)) %>% 
     st_cast("MULTIPOLYGON")
 }, simplify = FALSE, USE.NAMES = TRUE)
 
+# Refactor to look at invasion of each species by subzone
+bc_inv_subzones <- sort(unique(unlist(
+  sapply(bc_all_sp_by_subzone, dplyr::pull, SUBZONE))))
+bc_all_subzones_by_sp <- sapply(bc_inv_subzones, function(x) {
+  do.call(rbind, lapply(bc_all_sp_by_subzone, dplyr::filter, SUBZONE == x)) %>% 
+    rownames_to_column("species") %>% 
+    dplyr::arrange(desc(inv_ratio)) %>% 
+    dplyr::mutate(n_total = sum(n), )
+}, simplify = FALSE, USE.NAMES = TRUE)
+
 # Extract the spotted knapweed subzone summary for BC
 bc_sk_by_subzone <- bc_all_sp_by_subzone$SK
 
 # Total spotted knapweed invasion in BC
-bc_sk_invaded_area <- sum(bc_sk_by_subzone$sk_inv_area)
+bc_sk_invaded_area <- sum(bc_sk_by_subzone$inv_area)
 bc_sk_invaded_perc <- units::drop_units(bc_sk_invaded_area / bc_bgc_area * 100) 
 bc_sk_n_records <- bc_sk_by_subzone$n_orig[1]
 
@@ -323,23 +331,25 @@ bc_sk_by_subzone_ng <- bc_all_sp_by_subzone_ng$SK %>%
 bc_total_invaded_zone_ng <- bc_total_invaded_subzone_ng %>% 
   merge(merge(bc_sk_by_subzone_ng, bc_bgc_subzones_ng, all = TRUE), all = TRUE) %>% 
   dplyr::mutate(ZONE = sapply(strsplit(SUBZONE, "[[:lower:]]"), "[[", 1)) %>% 
-  group_by(ZONE, n_orig) %>% 
+  group_by(ZONE) %>% 
   dplyr::summarise(total_n = sum(total_n, na.rm = TRUE), 
                    total_inv_area = sum(total_inv_area, na.rm = TRUE),
-                   bgc_area = sum(bgc_area, na.rm = TRUE), .groups = "drop",
-                   sk_n = sum(sk_n, na.rm = TRUE),
-                   sk_inv_area = sum(sk_inv_area, na.rm = TRUE)) %>% 
+                   bgc_area = sum(bgc_area, na.rm = TRUE),
+                   sk_n_orig = mean(n_orig, na.rm = TRUE), 
+                   sk_n = sum(n, na.rm = TRUE),
+                   sk_inv_area = sum(inv_area, na.rm = TRUE), .groups = "drop") %>% 
   dplyr::mutate(total_inv_ratio = units::drop_units(total_inv_area / bgc_area * 100),
                 bgc_ratio = units::drop_units(bgc_area / bc_bgc_area * 100),
                 sk_ratio = units::drop_units(sk_inv_area / bgc_area * 100))
 
 # Recreate a "ZONE" column and create summaries by BGC zone for each species
-bc_all_sp_by_zone_ng <- lapply(bc_all_sp_invaded_subzone_ng, function(x) {
+bc_all_sp_by_zone_ng <- lapply(bc_all_sp_by_subzone_ng, function(x) {
   dplyr::mutate(x, ZONE = sapply(strsplit(SUBZONE, "[[:lower:]]"), "[[", 1)) %>% 
     group_by(ZONE) %>% 
     dplyr::summarise(n = sum(n, na.rm = TRUE), 
                      inv_area = sum(inv_area, na.rm = TRUE),
-                     bgc_area = sum(bgc_area, na.rm = TRUE), .groups = "drop") %>% 
+                     bgc_area = sum(bgc_area, na.rm = TRUE),
+                     n_orig = mean(n_orig, na.rm = TRUE),  .groups = "drop") %>% 
     dplyr::mutate(inv_ratio = units::drop_units(inv_area / bgc_area * 100),
                   bgc_ratio = units::drop_units(bgc_area / bc_bgc_area * 100)) %>% 
     dplyr::arrange(desc(inv_ratio)) %>% 
@@ -353,20 +363,36 @@ bc_all_sp_by_subzone_ng <- lapply(bc_all_sp_by_subzone_ng, dplyr::select, -start
 
 # Extract total areas as well
 bc_all_sp_tot_area <- lapply(bc_all_sp_by_subzone_ng, function(x) {
-  summarise(x, n = sum(n), inv_area = sum(inv_area)) %>% 
+  summarise(x, n = mean(n_orig, na.rm = TRUE), inv_area = sum(inv_area)) %>% 
     dplyr::mutate(inv_ratio = units::drop_units(inv_area / bc_bgc_area * 100))}) %>% 
   do.call(rbind, .) %>% 
   rownames_to_column("species")
     
-
-# Create tables for export
+# Create tables for export: 
+# Export BEC data by subzone
 bc_bgc_data <- merge(bc_bgc_subzones_ng, merge(
   bc_total_invaded_subzone_ng, bc_sk_by_subzone_ng, all = TRUE), all = TRUE) %>% 
-  dplyr::select(SUBZONE, starts_with("bgc"), ends_with("rank"))
+  dplyr::select(SUBZONE, starts_with("bgc"), ends_with("rank")) %>% 
+  dplyr::rename(sk_inv_rank = inv_rank)
 
-bc_inv_data <- merge(bc_bgc_subzones_ng, merge(
-  bc_total_invaded_subzone_ng, bc_sk_by_subzone_ng, all = TRUE), all = TRUE) %>% 
-  dplyr::select(-c(starts_with("bgc"), ends_with("rank")))
+# Export invasion data by subzone - get most invasive species by subzone first
+bc_most_inv_sp_by_subzone <- lapply(bc_all_subzones_by_sp, dplyr::slice_max, inv_ratio) %>% 
+  do.call(rbind, .) %>% 
+  st_drop_geometry() %>% 
+  group_by(SUBZONE) %>% 
+  dplyr::slice_max(inv_area) %>% 
+  dplyr::slice_max(n) %>% 
+  dplyr::slice_max(n_orig) %>% 
+  ungroup() %>% 
+  dplyr::select(species, SUBZONE)
+
+bc_inv_data <- Reduce(
+  function(x, y, ...) merge(x, y, all = TRUE, ...),
+  list(bc_bgc_subzones_ng, bc_total_invaded_subzone_ng, bc_sk_by_subzone_ng, 
+       bc_most_inv_sp_by_subzone)) %>% 
+  dplyr::select(-c(starts_with("bgc"), ends_with("rank"))) %>% 
+  dplyr::rename(sk_n = n, sk_n_orig = n_orig, sk_inv_ratio = inv_ratio, 
+                sk_inv_area = inv_area, most_inv_species = species)
 
 # Filter to only include subzone names that are in LDB for easier comparison
 bc_bgc_data_limit <- dplyr::filter(bc_bgc_data, SUBZONE %in% ldb_bec$SUBZONE)
@@ -380,11 +406,18 @@ bc_extra_data <- tribble(
   "sk_inv_area_km2", units::drop_units(bc_sk_invaded_area),
   "sk_inv_ratio", bc_sk_invaded_perc,
   "sk_inv_records", bc_sk_n_records,
-  "total_bc_area_km2", units::drop_units(bc_bgc_area)
-)
+  "total_bc_area_km2", units::drop_units(bc_bgc_area))
 
-t_finish <- Sys.time()
-t_run <- t_finish - t_start
+# Summary by species
+bc_inv_sp_extent <- data.frame(n_subzones = sapply(bc_all_sp_by_subzone, nrow),
+                               inv_area = sapply(bc_all_sp_by_subzone, function(x)
+                                 sum(dplyr::pull(x, inv_area))),
+                               n_records = sapply(bc_all_sp_by_subzone, function(x)
+                                 dplyr::pull(x, n_orig)[1]),
+                               most_inv_subzone = sapply(bc_all_sp_by_subzone, function(x)
+                                 dplyr::slice_max(x, inv_area)$SUBZONE)) %>% 
+  rownames_to_column("species") %>% 
+  dplyr::arrange(desc(inv_area))
 
 # Save as individual files for faster reading in later on if necessary
 st_write(bc_bgc_subzones, file.path(bc_maps_dir, "bc_subzones.gpkg"), delete_layer = TRUE, quiet = TRUE)
@@ -399,6 +432,7 @@ write.csv(bc_inv_data, file.path(results_dir, "bc_invasive_data_total.csv"), row
 write.csv(bc_inv_data_limit, file.path(results_dir, "bc_invasive_data_limit.csv"), row.names = FALSE)
 write.csv(bc_extra_data, file.path(results_dir, "bc_extra_data.csv"), row.names = FALSE)
 write.csv(bc_total_invaded_zone_ng, file.path(results_dir, "bc_zone_inv_data.csv"), row.names = FALSE)
+write.csv(bc_inv_sp_extent, file.path(results_dir, "bc_inv_sp_extent.csv"), row.names = FALSE)
 
 ```
 
