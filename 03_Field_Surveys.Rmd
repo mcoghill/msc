@@ -10,7 +10,7 @@ This document will go through the field surveys from each field plot and produce
 ```{r Load packages}
 
 suppressMessages(suppressWarnings({
-  ls <- c("tidyverse", "broom", "car", "ggpubr", "car", "foreach", "sf", 
+  ls <- c("tidyverse", "broom", "car", "ggpubr", "car", "sf", 
           "extrafont", "vegan", "rstatix", "coin")
   new_packages <- ls[!(ls %in% installed.packages()[, "Package"])]
   if(length(new_packages)) install.packages(new_packages)
@@ -533,7 +533,7 @@ site_list <- bind_rows(sites_near, sites_within) %>%
 # Now, read CSV files matching the selected sites
 temp_data <- sapply(unique(site_list$Type), function(x) {
   df <- dplyr::filter(site_list, Type == x)
-  foreach(y = unique(df$Name), .combine = rbind) %do% {
+  bind_rows(lapply(unique(df$Name), function(y) {
     read.csv(file.path(temperature_dir, paste0(tolower(y), ".csv")), skip = 7, header = TRUE) %>% 
       dplyr::select(-X) %>% 
       drop_na() %>% 
@@ -544,7 +544,7 @@ temp_data <- sapply(unique(site_list$Type), function(x) {
                     day = as.numeric(strftime(Date, "%d"))) %>% 
       dplyr::select(-c(Date...Time, Date...Time.1)) %>% 
       dplyr::rename(time = Date...Time.2, temp = Temperature...C.)
-  } %>% group_by(DateTime, Date, month, day, time) %>% 
+  })) %>% group_by(DateTime, Date, month, day, time) %>% 
     dplyr::summarise(temp = mean(temp), .groups = "drop") %>% 
     dplyr::mutate(Type = as.factor(x))
 }, simplify = FALSE, USE.NAMES = TRUE)
@@ -571,13 +571,13 @@ temp_effect <- temp_data_df %>% wilcox_effsize(temp ~ Type) %>% mutate(metric = 
 # The data are indeed different across the entire range of when data was collected
 # Now, create figure
 p <- ggplot(temp_data_df, aes(DateTime, temp)) +
-  geom_line(aes(color = Type), size = 1, alpha = 0.33) +
+  geom_line(aes(color = Type), size = 1, alpha = 0.25) +
   geom_smooth(
     aes(fill = Type, color = Type),
     size = 1,
-    alpha = 0.5) +
-  scale_color_manual(values = c("red", "black"), name = "Survey Site") +
-  scale_fill_manual(values = c("red", "black"), name = "Survey Site") +
+    alpha = 0.6) +
+  scale_color_manual(values = c("grey33", "black"), name = "Survey Site") +
+  scale_fill_manual(values = c("grey33", "black"), name = "Survey Site") +
   scale_y_continuous(
     expand = c(0, 0),
     limits = c(5, 40),
@@ -615,7 +615,7 @@ p <- ggplot(temp_data_df, aes(DateTime, temp)) +
 # There may be something to those smoothed lines that the noise has a hard
 # time picking up
 smooth_data <- ggplot_build(p)$data[[2]] %>% 
-  dplyr::mutate(Type = as.factor(ifelse(fill == "red", "Invaded", "Pristine")))
+  dplyr::mutate(Type = as.factor(ifelse(fill == "black", "Invaded", "Pristine")))
 
 # Test of equal variances and normality
 
@@ -648,4 +648,3 @@ write.csv(temp_effect, file.path(
   results_dir, "03c_temperature_effects.csv"), row.names = FALSE)
 
 ```
-
