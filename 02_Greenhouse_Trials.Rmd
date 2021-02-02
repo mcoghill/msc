@@ -694,7 +694,7 @@ art_custom <- function(x, dv) {
     
     # Create data frame to generate stats and figures from for a single species
     df <- x %>% 
-      dplyr::select(-germ_rat) %>% 
+      dplyr::select(-any_of("germ_rat")) %>% 
       dplyr::filter(Species == i) %>% 
       dplyr::rename(var = sym(dv)) %>% 
       droplevels() %>% 
@@ -714,6 +714,10 @@ art_custom <- function(x, dv) {
     # related to type III tests and return F values - this was hours of research
     main_type <- joint_tests(m.type, by = "Soil_Treatment") %>% as.data.frame()
     main_trt <- joint_tests(m.trt, by = "Soil_Type") %>% as.data.frame()
+    
+    title <- case_when(i == "RF" ~ "Rough Fescue",
+                       i == "SK" ~ "Spotted Knapweed")
+    title <- if(is.na(title)) NULL else title
     
     # Create pairwise comparisons for each factor using emmeans package
     pwc_type_emmeans <- m.type$model %>% 
@@ -828,13 +832,14 @@ art_custom <- function(x, dv) {
         data = pwc_trt_join %>% dplyr::filter(p.adj < 0.05, p.adj < 0.001), 
         type = "expression", size = 1, label.size = 3.5)}} + 
       # scale_x_discrete(labels = c(AC = "AC", Ash = "Ash", Con = "Control")) +
-      ggtitle(ifelse(i == "RF", "Rough Fescue", "Spotted Knapweed")) +
+      ggtitle(title) +
       xlab("Soil Type") +
       ylab(ifelse(dv == "germ_rat", expression(bold(sqrt("Germination Rate"))), 
                   case_when(
         dv == "deaths" ~ "ART (Death Rate)",
         dv == "trial_surv" ~ "ART (Trial\nSurvival Rate)", 
         dv == "germ_surv" ~ "ART (Germination\nSurvival Rate)",
+        dv == "CN" ~ "ART (C:N Ratio)",
         TRUE ~ "error"))) +
       theme_classic(base_size = 16) +
       theme(
@@ -854,7 +859,7 @@ art_custom <- function(x, dv) {
         plot.title = element_text(face = "bold", hjust = 0.5)) +
       scale_y_continuous(
         expand = c(0, 0), 
-        limits = c(0, 100)) +
+        limits = c(0, ifelse(dv == "CN", 40, 100))) +
       scale_fill_manual(
         values = c("gray99", "gray66", "gray33"),
         breaks = c("Con", "Ash", "AC"),
@@ -1075,40 +1080,82 @@ Shifting gears to the elemental analyzer data now:
 ```{r Elemental analyzer data load stats and figure}
 
 analyzer <- read.csv(file.path(data_dir, "Analyzer.csv")) %>% 
-  dplyr::mutate(Species = "all") # For tricking my function
+  dplyr::mutate(Species = "all", CN = Carbon/Nitrogen) # For tricking my function
 
 el_assum <- lapply(list(
   Nitrogen = anova_assum(analyzer, "Nitrogen", rm_outliers = FALSE), 
   Carbon = anova_assum(analyzer, "Carbon", rm_outliers = FALSE), 
-  Hydrogen = anova_assum(analyzer, "Hydrogen", rm_outliers = FALSE)), "[[", "all")
+  Hydrogen = anova_assum(analyzer, "Hydrogen", rm_outliers = FALSE), 
+  CN = anova_assum(analyzer, "CN", rm_outliers = FALSE)), "[[", "all")
+
+# CN isn't normal/no equal variances, try sqrt transform
+analyzer <- dplyr::mutate(analyzer, CN_trans = sqrt(CN))
+cn_assum <- anova_assum(analyzer, "CN_trans", rm_outliers = FALSE)
+
+# Didn't work, try log10
+analyzer <- dplyr::mutate(analyzer, CN_trans = log10(CN))
+cn_assum <- anova_assum(analyzer, "CN_trans", rm_outliers = FALSE)
+
+# Didn't work, try squaring
+analyzer <- dplyr::mutate(analyzer, CN_trans = CN^2)
+cn_assum <- anova_assum(analyzer, "CN_trans", rm_outliers = FALSE)
+
+# Didn't work, try inverse
+analyzer <- dplyr::mutate(analyzer, CN_trans = 1/CN)
+cn_assum <- anova_assum(analyzer, "CN_trans", rm_outliers = FALSE)
+
+# Didn't work, will have to do non-parametric 2 way ANOVA
+analyzer <- dplyr::select(analyzer, -CN_trans)
 
 # All assumptions are validated, good to use ANOVA
-el_anova <- lapply(el_assum, function(x) 
-  anova_analysis(x$data, names(x$data)[4])[[1]])
+el_anova <- c(lapply(el_assum[c(1:3)], function(x) 
+  anova_analysis(x$data, names(x$data)[4])[[1]]),
+  CN = unname(art_custom(analyzer, "CN")))
+
+# Rename columns to match other names for export
+analyzer$CN <- el_anova$CN$data$all_aligned_ranks
+el_anova$CN$data <- dplyr::rename(el_anova$CN$data, CN = var)
+el_anova$CN$two_way <- el_anova$CN$two_way %>% 
+  dplyr::rename(Effect = term, DFn = df, DFd = Df.res,
+                `F` = statistic, p = p.value) %>% 
+  dplyr::select(-c(sumsq, Sum.Sq.res))
+
+el_anova$CN$main_type <- el_anova$CN$main_type %>% 
+  dplyr::rename(Effect = `model term`, DFn = df1, DFd = df2,
+                `F` = F.ratio, p = p.value)
+
+el_anova$CN$main_treatment <- el_anova$CN$main_treatment %>% 
+  dplyr::rename(Effect = `model term`, DFn = df1, DFd = df2,
+                `F` = F.ratio, p = p.value)
+
+names(el_anova$CN) <- gsub("main", "one_way", names(el_anova$CN))
+names(el_anova$CN) <- gsub("pwc_type", "pwc_treatment_", names(el_anova$CN))
+names(el_anova$CN) <- gsub("pwc_treatment$", "pwc_type", names(el_anova$CN))
+names(el_anova$CN) <- gsub("pwc_treatment_", "pwc_treatment", names(el_anova$CN))
 
 # Prepare data for saving
-
 el_norm_assum <- lapply(el_assum, "[[", "shapiro_whole") %>% 
   do.call(rbind, .) %>% rownames_to_column("Element")
 el_var_eq_assum <- lapply(el_assum, "[[", "levene") %>% 
   do.call(rbind, .) %>% rownames_to_column("Element")
 
 el_analysis_input <- lapply(el_anova, "[[", "data") %>% 
-  lapply(function(x) pivot_longer(x, cols = c("Nitrogen", "Carbon", "Hydrogen")[
-    c("Nitrogen", "Carbon", "Hydrogen") %in% names(x)], names_to = "Element", 
-    values_to = "total")) %>% 
+  lapply(function(x) pivot_longer(x, cols = c("Nitrogen", "Carbon", "Hydrogen", "CN")[
+    c("Nitrogen", "Carbon", "Hydrogen", "CN") %in% names(x)], names_to = "Element", 
+    values_to = "total") %>% 
+      dplyr::select(Soil_Type, Soil_Treatment, Element, total)) %>% 
   do.call(rbind, .) %>% 
   remove_rownames()
 
 el_analysis_two_way <- lapply(el_anova, function(x) {
   data.frame(x$two_way) %>% 
-    dplyr::select(-p..05) %>% 
+    dplyr::select(-any_of(c("Term", "p..05", "ges"))) %>% 
     rename_with(~str_c(., "_", paste0(names(x$data)[4])), where(is.numeric))}) %>% 
   Reduce(f = function(x, y) merge(x, y), x = .) %>% 
   dplyr::select(sort(tidyselect::peek_vars())) %>% 
   dplyr::relocate(Effect)
 
-el_analysis_tukey <- lapply(el_anova, function(x) {
+el_analysis_tukey <- lapply(el_anova[1:3], function(x) {
   data.frame(x$tukey) %>% 
     dplyr::select(-c(p.adj.signif, null.value)) %>% 
     rename_with(~str_c(., "_", paste0(names(x$data)[4])), where(is.numeric))}) %>% 
@@ -1118,7 +1165,7 @@ el_analysis_tukey <- lapply(el_anova, function(x) {
 
 el_analysis_anova_type <- lapply(el_anova, function(x) {
   data.frame(x$one_way_type) %>% 
-    dplyr::select(-p..05) %>% 
+    dplyr::select(-any_of(c("p..05", "ges"))) %>% 
     rename_with(~str_c(., "_", paste0(names(x$data)[4])), where(is.numeric))}) %>% 
   Reduce(f = function(x, y) merge(x, y), x = .) %>% 
   dplyr::select(sort(tidyselect::peek_vars())) %>% 
@@ -1126,7 +1173,7 @@ el_analysis_anova_type <- lapply(el_anova, function(x) {
 
 el_analysis_anova_treatment <- lapply(el_anova, function(x) {
   data.frame(x$one_way_treatment) %>% 
-    dplyr::select(-p..05) %>% 
+    dplyr::select(-any_of(c("p..05", "ges"))) %>% 
     rename_with(~str_c(., "_", paste0(names(x$data)[4])), where(is.numeric))}) %>% 
   Reduce(f = function(x, y) merge(x, y), x = .) %>% 
   dplyr::select(sort(tidyselect::peek_vars())) %>% 
@@ -1134,18 +1181,20 @@ el_analysis_anova_treatment <- lapply(el_anova, function(x) {
 
 el_analysis_pwc_type <- lapply(el_anova, function(x) {
   x$pwc_type %>% 
+    dplyr::select(-any_of(c("df", ".y.", "p.adj.signif"))) %>% 
     rename_with(~str_c(., "_", paste0(names(x$data)[4])), where(is.numeric))}) %>% 
-  Reduce(f = function(x, y) merge(x, y, by = c("Soil_Type", "group1", "group2")), x = .) %>% 
+  Reduce(f = function(x, y) merge(x, y, by = c("Soil_Type", "term", "group1", "group2")), x = .) %>% 
   dplyr::select(sort(tidyselect::peek_vars())) %>% 
-  dplyr::relocate(Soil_Type, term, .y., group1, group2) %>% 
+  dplyr::relocate(Soil_Type, term, group1, group2) %>% 
   dplyr::relocate(starts_with("p.adj"), .after = starts_with("p_"))
 
 el_analysis_pwc_treatment <- lapply(el_anova, function(x) {
   x$pwc_treatment %>% 
+    dplyr::select(-any_of(c("df", ".y.", "p.adj.signif"))) %>% 
     rename_with(~str_c(., "_", paste0(names(x$data)[4])), where(is.numeric))}) %>% 
-  Reduce(f = function(x, y) merge(x, y, by = c("Soil_Treatment", "group1", "group2")), x = .) %>% 
+  Reduce(f = function(x, y) merge(x, y, by = c("Soil_Treatment", "term", "group1", "group2")), x = .) %>% 
   dplyr::select(sort(tidyselect::peek_vars())) %>% 
-  dplyr::relocate(Soil_Treatment, term, .y., group1, group2) %>% 
+  dplyr::relocate(Soil_Treatment, term, group1, group2) %>% 
   dplyr::relocate(starts_with("p.adj"), .after = starts_with("p_"))
 
 # Create summary data for plotting
@@ -1173,7 +1222,7 @@ write.csv(el_analysis_pwc_treatment, file.path(
   results_dir, "06i_elemental_analysis_pairwise_comparisons_soil_treatment.csv"), row.names = FALSE)
 
 # Plot results
-analyzer_plots <- sapply(c("Nitrogen", "Carbon", "Hydrogen"), function(x) {
+analyzer_plots <- sapply(names(el_anova)[1:3], function(x) {
   df <- dplyr::select(analyzer, c(Soil_Type, Soil_Treatment, all_of(x))) %>% 
     unite(trt, c("Soil_Type", "Soil_Treatment"), remove = FALSE) %>% 
     droplevels() %>% 
@@ -1181,6 +1230,11 @@ analyzer_plots <- sapply(c("Nitrogen", "Carbon", "Hydrogen"), function(x) {
     dplyr::rename(data = 4)
   
   pwc <- el_anova[[x]]$pwc_type
+  # if(x == "CN") {
+  #   pwc <- dplyr::mutate(pwc, y.position = y.position - 18.5)
+  # }
+  
+  label <- if(x == "CN") "ART (C:N Ratio)" else paste0("Total ", x, " (%)")
   
   p <- ggboxplot(df, x = "Soil_Type", y = "data", fill = "Soil_Treatment", 
                  width = 0.7, color = "black", palette = c("gray99", "gray66", "gray33"),
@@ -1198,7 +1252,7 @@ analyzer_plots <- sapply(c("Nitrogen", "Carbon", "Hydrogen"), function(x) {
         data = pwc %>% dplyr::filter(p.adj < 0.05, p.adj < 0.001), 
         type = "expression", size = 1, label.size = 3.5)}} +
     xlab("Soil Type") +
-    ylab(paste0("Total ", x, " (%)"))  +
+    ylab(label)  +
     theme_classic(base_size = 16) +
     theme(
       text = element_text(family="Times New Roman"), 
@@ -1234,5 +1288,12 @@ analyzer_plots <- sapply(c("Nitrogen", "Carbon", "Hydrogen"), function(x) {
 final <- ggarrange(plotlist = analyzer_plots[2:1], common.legend = TRUE, legend = "bottom") +
   ggsave(filename = file.path(plot_dir, "CN_plot.png"), width = 6, height = 3, dpi = 300)
 
-```
+final2 <- ggarrange(plotlist = list(analyzer_plots[[3]], el_anova$CN$plot), common.legend = TRUE, legend = "bottom") +
+  ggsave(filename = file.path(plot_dir, "H_CN_plot.png"), width = 6, height = 3, dpi = 300)
 
+final3 <- ggarrange(plotlist = c(
+  analyzer_plots[2:1], list(analyzer_plots[[3]], el_anova$CN$plot)), common.legend = TRUE, legend = "bottom", ncol = 2, nrow = 2) +
+  ggsave(filename = file.path(plot_dir, "EL_Analysis_plot.png"), width = 6, height = 6, dpi = 300)
+
+
+```
