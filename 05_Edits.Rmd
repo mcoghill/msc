@@ -1,0 +1,160 @@
+---
+title: "05_Edits"
+author: "Matt"
+date: "3/31/2021"
+output: html_document
+---
+
+```{r}
+
+ls <- c("tidyverse", "bcmaps", "bcdata", "sf", "terra", "raster", "mapview",
+        "rstatix", "ggpubr")
+invisible(suppressWarnings(suppressMessages(
+  sapply(ls, library, character.only = TRUE, quietly = TRUE)[0])))
+
+```
+
+
+
+```{r}
+
+data_dir <- file.path("./01_Spatial_Data/data")
+
+ldb_aoi <- bcdata::bcdc_query_geodata("1130248f-f1a3-4956-8b2e-38d29d3e4af7", crs = 3005) %>% 
+  bcdata::filter(PROTECTED_LANDS_NAME %in% c(
+    "LAC DU BOIS GRASSLANDS PROTECTED AREA", 
+    "MCQUEEN CREEK ECOLOGICAL RESERVE",
+    "TRANQUILLE ECOLOGICAL RESERVE")) %>% 
+  bcdata::collect() %>% 
+  sf::st_union()
+
+ldb_soil <- bcdata::bcdc_query_geodata("20150a67-5a2d-425f-8216-ff0f97f68df9", crs = 3005) %>% 
+  bcdata::filter(INTERSECTS(ldb_aoi)) %>% 
+  bcdata::collect()
+
+```
+
+
+```{r MSC Study area analysis}
+
+msc_map_dir <- file.path("./01_Spatial_Data/layers/study_area")
+dir.create(msc_map_dir, showWarnings = FALSE, recursive = TRUE)
+
+unzip(file.path(data_dir, "Matt.kmz"), exdir = tempdir(), overwrite = TRUE)
+layers <- st_layers(file.path(tempdir(), "doc.kml"))$name
+field_data <- sapply(layers, function(x)
+  st_read(file.path(tempdir(), "doc.kml"), layer = x, quiet = TRUE), 
+  simplify = FALSE, USE.NAMES = TRUE)
+area_of_invasion <- field_data[[which(sapply(field_data, function(x) 
+  st_geometry_type(x, by_geometry = FALSE) == "POLYGON"))]] %>% 
+  st_transform(3005) %>% 
+  st_make_valid()
+sample_sites <- field_data[which(sapply(field_data, function(x) 
+  st_geometry_type(x, by_geometry = FALSE) == "POINT" && any(grepl("Pri|Inv", x$Name))))] %>% 
+  lapply(dplyr::mutate, site = ifelse(grepl("Pri", Name), "Pristine", "Invaded")) %>% 
+  bind_rows() %>% 
+  st_transform(3005) %>% 
+  st_make_valid()
+
+# Do some exploration of the spatial data here:
+sample_site_exp <- cbind(
+  sample_sites, 
+  within = st_within(sample_sites, area_of_invasion, sparse = FALSE), 
+  distance_to_poly = st_distance(sample_sites, area_of_invasion))
+
+samples_comb <- st_union(area_of_invasion, sample_sites) %>% 
+  st_bbox() %>% 
+  st_as_sfc() %>% 
+  st_buffer(25)
+
+# Get all soil records
+samples_soil <- st_intersection(ldb_soil, samples_comb)
+
+# Get DEM
+samples_dem <- rast(cded_raster(samples_comb))
+samples_dem_bca <- project(samples_dem, st_crs(sample_sites)$wkt, wopt = list(names = "dem"))
+
+# Get slope and aspect
+ter <- c(samples_dem_bca,
+         terrain(samples_dem_bca, v = "slope", unit = "radians", neighbors = 8),
+         terrain(samples_dem_bca, v = "aspect", unit = "radians", neighbors = 8))
+
+# Extract slope/aspect/elevation values, look for differences
+ter_extract <- cbind(sample_site_exp, 
+                     extract(ter, st_coordinates(sample_sites), method = "bilinear"))
+
+# T-tests for differences
+t_elev <- t.test(dem ~ site, data = st_drop_geometry(ter_extract))
+t_slope <- t.test(slope ~ site, data = st_drop_geometry(ter_extract))
+t_aspect <- t.test(aspect ~ site, data = st_drop_geometry(ter_extract))
+
+# Write layers separately
+# st_write(area_of_invasion, file.path(msc_map_dir, "aoi.gpkg"), delete_layer = TRUE,
+#          quiet = TRUE)
+# st_write(sample_site_exp, file.path(msc_map_dir, "sample_locations.gpkg"), 
+#          delete_layer = TRUE, quiet = TRUE)
+# write.csv(aoi_exp, file.path(results_dir, "study_area_info.csv"), row.names = FALSE)
+# st_write(sample_sites, file.path(results_dir, "study_site_coordinates.csv"), 
+#          layer_options = "GEOMETRY=AS_XY", delete_dsn = TRUE)
+
+```
+
+I'll properly perform the assumptions below:
+
+```{r}
+
+ttest_assum <- function(x, dv, rm_outliers = TRUE) {
+  df <- x %>% 
+    dplyr::rename(var = sym(dv)) %>% 
+    group_by(site) %>% 
+    mutate(outlier = is_outlier(var), extreme = is_extreme(var)) %>% 
+    ungroup() %>% 
+    {if(rm_outliers) dplyr::filter(., !extreme) else .}
+  shapiro_model <- df %>% 
+    group_by(site) %>% 
+    shapiro_test(var)
+  norm_plot_model <- ggqqplot(df, x = "var", facet.by = "site")
+  levene <- df %>% levene_test(var ~ site)
+  df <- dplyr::rename(df, !!dv := var)
+  return(list(data = df, shapiro = shapiro_model, 
+              norm_plot = norm_plot_model, levene = levene))
+}
+
+dem_assum <- ttest_assum(st_drop_geometry(ter_extract), "dem", rm_outliers = FALSE)
+slope_assum <- ttest_assum(st_drop_geometry(ter_extract), "slope", rm_outliers = TRUE)
+aspect_assum <- ttest_assum(st_drop_geometry(ter_extract), "aspect", rm_outliers = FALSE)
+
+# Slope in invaded sites violated normality, but other than that all are normal.
+# equal variances for aspect and slope, not for DEM
+
+ttest_custom <- function(x, dv, var.equal = TRUE, rm_outliers = TRUE) {
+  df <- dplyr::rename(x, var = sym(dv)) %>% 
+    group_by(site) %>% 
+    mutate(outlier = is_outlier(var), extreme = is_extreme(var)) %>% 
+    ungroup() %>% 
+    {if(rm_outliers) dplyr::filter(., !extreme) else .}
+  ttest <- df %>% t_test(var ~ site, var.equal = var.equal) %>% 
+    add_significance()
+  ttest_plot <- ttest %>% add_xy_position(x = "site")
+  effect <- df %>% cohens_d(var ~ site, var.equal = var.equal)
+  plot <- ggboxplot(
+    df, x = "site", y = "var", ylab = dv, xlab = "site", add = "jitter") +
+    stat_pvalue_manual(ttest_plot, tip.length = 0) + 
+    labs(subtitle = get_test_label(ttest_plot, detailed = TRUE))
+  df <- dplyr::rename(df, !!dv := var)
+  return(list(data = df, ttest = ttest, effect = effect, plot = plot))
+}
+
+t_elev <- ttest_custom(st_drop_geometry(ter_extract), "dem", var.equal = FALSE, rm_outliers = FALSE)
+t_slope <- ttest_custom(st_drop_geometry(ter_extract), "slope", var.equal = TRUE, rm_outliers = FALSE)
+t_aspect <- ttest_custom(st_drop_geometry(ter_extract), "aspect", var.equal = TRUE, rm_outliers = FALSE)
+
+# Summary
+site_sum <- st_drop_geometry(ter_extract) %>% 
+  group_by(site) %>% 
+  summarise(across(c(dem, slope, aspect), list(
+    mean = ~mean(.x), sd = ~sd(.x), se = ~(sd(.x) / (sqrt(10)))), .names = "{.fn}.{.col}"), .groups = "drop")
+
+```
+
+
