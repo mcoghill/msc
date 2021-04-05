@@ -699,11 +699,19 @@ art_custom <- function(x, dv) {
       dplyr::rename(var = sym(dv)) %>% 
       droplevels() %>% 
       dplyr::mutate(Soil_Type = factor(Soil_Type, levels = c("Invaded", "Pristine")),
-                    Soil_Treatment = factor(Soil_Treatment, levels = c("Con", "Ash", "AC")))
+                    Soil_Treatment = factor(Soil_Treatment, levels = c("Con", "Ash", "AC"))) %>% 
+      as.data.frame() # This is important for ART to run
     
     # Perform aligned rank transformation (ART)
     m <- art(var ~ Soil_Type * Soil_Treatment, data = df)
     anova <- anova(m, response = "art") %>% broom::tidy()
+    
+    # Note: As of Feb. 2021, there is some new syntax invovled in the ARTool
+    # package that might be better to use. Will just comment it out for now
+    # since thesis is done, but revisit if necessary. This is the same as running
+    # emmeans::contrasts(), so it only produces t.values, not F values:
+    main_type <- art.con(m, "Soil_Treatment", method = "eff", adjust = "bonferroni")
+    main_trt <- art.con(m, "Soil_Type", method = "eff", adjust = "bonferroni")
     
     # Generate linear model objects of each factor from the main ART model
     m.type <- artlm(m, "Soil_Type")
